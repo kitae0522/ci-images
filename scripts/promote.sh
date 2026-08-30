@@ -26,8 +26,21 @@ manifest_is_missing() {
 }
 
 inspect_dated_tag() {
-  local image="$1" output
-  if output="$(docker buildx imagetools inspect "$image:$date_tag" 2>&1)"; then
+  local image="$1" expected_digest="$2" output actual_digest
+  if output="$(docker buildx imagetools inspect "$image:$date_tag" \
+    --format '{{json .Manifest}}' 2>&1)"; then
+    if ! actual_digest="$(jq -er \
+      '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+      <<<"$output")"; then
+      printf 'Unable to parse manifest digest for %s:%s: %s\n' \
+        "$image" "$date_tag" "$output" >&2
+      return 2
+    fi
+    if [[ "$actual_digest" != "$expected_digest" ]]; then
+      printf 'Existing dated tag %s:%s has digest %s, expected %s.\n' \
+        "$image" "$date_tag" "$actual_digest" "$expected_digest" >&2
+      return 2
+    fi
     return 0
   fi
   if manifest_is_missing "$output" "$image:$date_tag"; then
@@ -38,14 +51,36 @@ inspect_dated_tag() {
   return 2
 }
 
+require_exact_digest() {
+  local reference="$1" expected_digest="$2" output actual_digest
+  if ! output="$(docker buildx imagetools inspect "$reference" \
+    --format '{{json .Manifest}}' 2>&1)"; then
+    printf 'Unable to verify promoted reference %s: %s\n' \
+      "$reference" "$output" >&2
+    return 1
+  fi
+  if ! actual_digest="$(jq -er \
+    '.digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+    <<<"$output")"; then
+    printf 'Unable to parse promoted digest for %s: %s\n' \
+      "$reference" "$output" >&2
+    return 1
+  fi
+  if [[ "$actual_digest" != "$expected_digest" ]]; then
+    printf 'Promoted reference %s has digest %s, expected %s.\n' \
+      "$reference" "$actual_digest" "$expected_digest" >&2
+    return 1
+  fi
+}
+
 base_dated_status=0
 docker_dated_status=0
-if inspect_dated_tag ghcr.io/kitae0522/ci-ubuntu-base; then
+if inspect_dated_tag ghcr.io/kitae0522/ci-ubuntu-base "$base_digest"; then
   base_dated_status=0
 else
   base_dated_status=$?
 fi
-if inspect_dated_tag ghcr.io/kitae0522/ci-ubuntu-docker; then
+if inspect_dated_tag ghcr.io/kitae0522/ci-ubuntu-docker "$docker_digest"; then
   docker_dated_status=0
 else
   docker_dated_status=$?
@@ -61,14 +96,25 @@ if (( base_dated_status != docker_dated_status )); then
 fi
 
 if (( base_dated_status == 1 )); then
-  docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-base:"$date_tag" \
+  docker buildx imagetools create --prefer-index=false \
+    -t ghcr.io/kitae0522/ci-ubuntu-base:"$date_tag" \
     ghcr.io/kitae0522/ci-ubuntu-base@"$base_digest"
-  docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-docker:"$date_tag" \
+  docker buildx imagetools create --prefer-index=false \
+    -t ghcr.io/kitae0522/ci-ubuntu-docker:"$date_tag" \
     ghcr.io/kitae0522/ci-ubuntu-docker@"$docker_digest"
 fi
 
+require_exact_digest \
+  ghcr.io/kitae0522/ci-ubuntu-base:"$date_tag" "$base_digest"
+require_exact_digest \
+  ghcr.io/kitae0522/ci-ubuntu-docker:"$date_tag" "$docker_digest"
+
 # Both dated-tag decisions are complete before either stable tag moves.
-docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-base:24.04 \
+docker buildx imagetools create --prefer-index=false \
+  -t ghcr.io/kitae0522/ci-ubuntu-base:24.04 \
   ghcr.io/kitae0522/ci-ubuntu-base@"$base_digest"
-docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-docker:24.04 \
+docker buildx imagetools create --prefer-index=false \
+  -t ghcr.io/kitae0522/ci-ubuntu-docker:24.04 \
   ghcr.io/kitae0522/ci-ubuntu-docker@"$docker_digest"
+require_exact_digest ghcr.io/kitae0522/ci-ubuntu-base:24.04 "$base_digest"
+require_exact_digest ghcr.io/kitae0522/ci-ubuntu-docker:24.04 "$docker_digest"
