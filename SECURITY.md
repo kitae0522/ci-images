@@ -20,16 +20,33 @@ lab smoke jobs remain limited to `contents: read` and `packages: read`.
 The upstream Actions runner automatically mounts `/var/run/docker.sock` into
 container jobs. The real daemon socket is relocated, making that automatic
 mount intentionally inert. The default path is not an authorization
-mechanism: base-image lab smoke explicitly fails if it is a usable socket, and
-this repository rejects workflow or template mappings to that path.
+mechanism: every lab-base job starts with an exact guard,
+`test ! -S /var/run/docker.sock`, and the closed workflow policy rejects
+workflow or template mappings to either `/var/run/docker.sock` or
+`/run/docker.sock`.
 
-Docker-enabled jobs must opt in with the alternate host socket at
-`/run/lab-docker/docker.sock` and set `DOCKER_HOST` to
-`unix:///run/lab-docker/docker.sock`. The Docker image contains client tools
-only, not a daemon. An opted-in job still has effective root control of the
-Docker host, so only trusted private workflows may use the socket-enabled
-template. Ordinary workflows must use the base image and must not add either
-socket mapping.
+The policy tool has a closed inventory of runner contracts. Hosted
+`validate`, `candidate`, and `promote` jobs run only on `ubuntu-24.04` and have
+no container or services. Lab-base `smoke-base`, `hold`, and the Go template's
+`test` use the exact `self-hosted, lab, linux, x64, container, lab-small`
+labels, the allowlisted base image, and only the standard CPU, memory, PID,
+and cgroup options. They have no services, volumes, or container environment;
+the inert-socket guard must be the first step and may not be made skippable or
+override its shell.
+
+Docker-enabled `smoke-docker` and Docker-template `test` jobs must use the
+same labels and resource options, the allowlisted Docker image, exactly one
+mapping of `/run/lab-docker/docker.sock` to the same path, and exactly
+`DOCKER_HOST=unix:///run/lab-docker/docker.sock`. Services, default-socket or
+other host mounts, privileged/PID-host options, dynamic policy fields, and
+unknown lab jobs are rejected. The Docker image contains client tools only,
+not a daemon. An opted-in job still has effective root control of the Docker
+host, so only trusted private workflows may use the socket-enabled template.
+Ordinary workflows must use the base image and must not add either socket
+mapping.
+
+Adding a workflow or lab job requires updating the allowlist and passing the
+pinned Go/actionlint policy gate; an unlisted or missing file/job fails closed.
 
 ## Image contents and releases
 
