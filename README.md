@@ -24,8 +24,8 @@ Docker daemon. Workflows choose language versions with `setup-*` actions.
 
 ## Tags and reproducibility
 
-- `:sha-abcdef1` is the immutable source-commit candidate and canonical
-  rollback identifier.
+- `:sha-abcdef1-<run-id>-<attempt>` is the immutable, run-unique candidate
+  tag. It includes the source SHA, `GITHUB_RUN_ID`, and `GITHUB_RUN_ATTEMPT`.
 - `:24.04-YYYYMMDD` is an immutable dated release and is never overwritten.
 - `:24.04` is the rolling stable tag, moved only after lab smoke succeeds.
 - An image digest (`@sha256:...`) is the strongest reproducibility reference.
@@ -55,20 +55,26 @@ Pull requests run entirely on GitHub-hosted runners. A protected `main`
 release, weekly rebuild (`17 19 * * 0`), or authorized manual dispatch follows
 this sequence:
 
-1. A GitHub-hosted candidate job builds both images, scans them, publishes
-   `sha-<7-char-source-sha>` candidates to GHCR, and emits provenance and
+1. A GitHub-hosted candidate job builds both images and publishes the
+   run-unique tag `sha-<7-char-source-sha>-<run-id>-<attempt>` to GHCR. It
+   emits the exact base and Docker manifest digests plus provenance and
    CycloneDX SBOM attestations.
-2. Two read-only `lab-small` jobs consume those immutable candidates. The base
-   smoke repeats the base contract; the Docker smoke mounts the socket
-   explicitly and repeats both contracts.
-3. A dependent GitHub-hosted promotion job, and only that job, has package write
-   permission. It creates the dated tag if absent and moves `:24.04` to the
-   smoke-tested candidate digest.
+2. `HIGH` findings are scanned and reported for both images. Push and
+   scheduled runs fail closed when either scan finds one. A manual dispatch may
+   continue only when its non-empty `high_vulnerability_exception` input
+   documents an owner, justification, and expiration; that exception is copied
+   to the workflow summary.
+3. Two read-only `lab-small` jobs consume the exact published digests, not a
+   mutable tag. The base smoke repeats the base contract; the Docker smoke
+   mounts the socket explicitly and repeats both contracts.
+4. The dependent GitHub-hosted promotion job creates the dated tag if absent
+   and moves `:24.04` to the smoke-tested candidate digest.
 
-Lab jobs have only `contents: read` and `packages: read`; they never log in to
-GHCR for publishing and never run fork-controlled revisions. The standard
-container limits are 1.5 CPUs, 2560 MiB, 768 PIDs, and
-`docker-workloads-ci.slice`.
+Only the hosted `candidate` and `promote` jobs have `packages: write` (the
+candidate also has attestation permissions). Lab jobs have only
+`contents: read` and `packages: read`; they never log in to GHCR for
+publishing and never run fork-controlled revisions. The standard container
+limits are 1.5 CPUs, 2560 MiB, 768 PIDs, and `docker-workloads-ci.slice`.
 
 ## Attestation and package checks
 
@@ -98,10 +104,12 @@ rm -rf "$tmp_config"
 
 Dependabot checks both Dockerfiles and GitHub Actions weekly. The base image
 rebuilds weekly so refreshed Ubuntu packages are included. A fixed `CRITICAL`
-vulnerability fails validation and blocks candidate promotion. `HIGH` findings
-are reported; promotion requires an explicit documented exception when no
-fixed package is available. Unfixed findings do not silently become release
-approval.
+vulnerability fails validation and blocks candidate promotion. Both images are
+scanned for `HIGH` findings; push and scheduled releases fail closed when either
+scan reports one. Only an authorized `workflow_dispatch` with a
+non-empty, documented `high_vulnerability_exception` (owner, justification,
+and expiration) may continue, and the exception is recorded in the workflow
+summary.
 
 See [SECURITY.md](SECURITY.md) for the runner and Docker-socket boundary and
 private vulnerability reporting.

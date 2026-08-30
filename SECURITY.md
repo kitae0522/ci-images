@@ -6,8 +6,10 @@ The `lab` runner is reserved for trusted, protected-repository revisions. Fork-
 controlled code must never select the `lab` labels, and the public
 `ci-images` repository never runs `pull_request` or `pull_request_target` code on
 `lab`. Pull-request validation stays on GitHub-hosted runners. Lab smoke runs
-only after an immutable candidate is published from protected `main` (or an
-authorized manual dispatch) and has package read permission only.
+only after a run-unique immutable candidate is published from protected `main`
+(or an authorized manual dispatch) and has package read permission only. The
+hosted `candidate` and `promote` jobs are the only jobs with `packages: write`;
+lab smoke jobs remain limited to `contents: read` and `packages: read`.
 
 ## Docker socket
 
@@ -20,10 +22,13 @@ base image and must not add the socket.
 
 Images contain no credentials, private source, tokens, SSH keys, Nix secrets,
 or Docker daemon. Candidates are scanned for fixed critical vulnerabilities;
-fixed critical findings block promotion. High findings are reported and need a
-documented exception when no fixed package is available. Verify provenance and
-SBOM attestations before adopting an image, and prefer a digest or immutable
-date tag for reproducibility.
+fixed critical findings block promotion. Both images are scanned for `HIGH`
+findings and those findings block push and scheduled releases. Only an
+authorized `workflow_dispatch` with a non-empty, documented
+`high_vulnerability_exception` (owner, justification, and expiration) may
+continue; the exception is recorded in the workflow summary. Verify provenance
+and SBOM attestations before adopting an image, and prefer the exact smoke-tested
+digest or an immutable date tag for reproducibility.
 
 ## Reporting a vulnerability
 

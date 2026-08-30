@@ -7,6 +7,13 @@ on:
   schedule:
     - cron: '17 19 * * 0'
   workflow_dispatch:
+    inputs:
+      high_vulnerability_exception:
+        description: >-
+          Document why HIGH findings are accepted, including an owner,
+          justification, and expiration date.
+        required: false
+        type: string
 
 concurrency:
   group: ci-images-publish
@@ -22,7 +29,7 @@ jobs:
       attestations: write
       id-token: write
     outputs:
-      short_sha: ${{ steps.publish.outputs.short_sha }}
+      candidate_tag: ${{ steps.publish.outputs.candidate_tag }}
       base_digest: ${{ steps.publish.outputs.base_digest }}
       docker_digest: ${{ steps.publish.outputs.docker_digest }}
     steps:
@@ -40,6 +47,45 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+      - name: Report HIGH vulnerabilities in base image
+        id: scan-high-base
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-base:test
+          severity: HIGH
+          exit-code: "1"
+      - name: Report HIGH vulnerabilities in Docker image
+        id: scan-high-docker
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-docker:test
+          severity: HIGH
+          exit-code: "1"
+      - name: Enforce HIGH vulnerability policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HIGH_EXCEPTION: ${{ inputs.high_vulnerability_exception }}
+          BASE_SCAN_OUTCOME: ${{ steps.scan-high-base.outcome }}
+          DOCKER_SCAN_OUTCOME: ${{ steps.scan-high-docker.outcome }}
+        run: |
+          if [[ "$BASE_SCAN_OUTCOME" != failure && "$DOCKER_SCAN_OUTCOME" != failure ]]; then
+            exit 0
+          fi
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            echo "HIGH vulnerabilities block push and schedule releases." >&2
+            exit 1
+          fi
+          if [[ -z "${HIGH_EXCEPTION//[[:space:]]/}" ]]; then
+            echo "A non-empty documented exception is required for HIGH vulnerabilities." >&2
+            exit 1
+          fi
+          {
+            echo "## HIGH vulnerability exception"
+            echo
+            echo "$HIGH_EXCEPTION"
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Generate base SBOM
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
@@ -94,7 +140,7 @@ jobs:
       contents: read
       packages: read
     container:
-      image: ghcr.io/kitae0522/ci-ubuntu-base:sha-${{ needs.candidate.outputs.short_sha }}
+      image: ghcr.io/kitae0522/ci-ubuntu-base@${{ needs.candidate.outputs.base_digest }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -115,7 +161,7 @@ jobs:
       contents: read
       packages: read
     container:
-      image: ghcr.io/kitae0522/ci-ubuntu-docker:sha-${{ needs.candidate.outputs.short_sha }}
+      image: ghcr.io/kitae0522/ci-ubuntu-docker@${{ needs.candidate.outputs.docker_digest }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
