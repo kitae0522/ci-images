@@ -1,0 +1,2 @@
+self-hosted-runner:
+  labels: [lab, linux, x64, container, lab-small]
