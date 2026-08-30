@@ -31,6 +31,36 @@ path and sets `DOCKER_HOST` to that same path. That opt-in still gives the job
 effective root control of the Docker host, so it is limited to trusted private
 workflows.
 
+## Closed workflow runner contracts
+
+The policy tool at `tools/workflow-policy` inventories every workflow and
+template. It fails closed for an unknown or missing file/job, so adding a new
+lab job requires an intentional policy change and review. The inventory is:
+
+- Hosted jobs (`validate`, `candidate`, and `promote`) run only on
+  `ubuntu-24.04` and have no job container or services.
+- Lab-base jobs (`smoke-base`, `hold`, and the Go template's `test`) use the
+  exact `self-hosted, lab, linux, x64, container, lab-small` labels, the
+  allowlisted base image, and the standard 1.5 CPU / 2560 MiB / 768 PID /
+  `docker-workloads-ci.slice` options. They have no services, volumes, or
+  container environment, and their first step must be exactly
+  `test ! -S /var/run/docker.sock` with no execution override.
+- The lab-docker jobs (`smoke-docker` and the Docker template's `test`) use
+  the same labels and resource options, the allowlisted Docker image, exactly
+  `DOCKER_HOST=unix:///run/lab-docker/docker.sock`, and exactly one
+  `/run/lab-docker/docker.sock:/run/lab-docker/docker.sock` mapping. Services,
+  default-socket mappings, extra host mounts, and dynamic policy values are
+  rejected.
+
+The hosted validation job runs the pinned Go policy module and actionlint:
+
+```bash
+(cd tools/workflow-policy && \
+  go mod verify && go test ./... && go run . ../.. && \
+  go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+    ../../.github/workflows/*.yml)
+```
+
 ## Tags and reproducibility
 
 - `:candidate-<sha7>-<run_id>-<run_attempt>` is the immutable, run-unique
@@ -55,6 +85,16 @@ scripts/build-and-test.sh
 nix shell nixpkgs#actionlint -c actionlint
 nix shell nixpkgs#hadolint -c hadolint --config .hadolint.yaml \
   images/base/Dockerfile images/docker/Dockerfile
+```
+
+Run the closed workflow policy gate as well (the CI job pins Go 1.25 and
+actionlint v1.7.12):
+
+```bash
+(cd tools/workflow-policy && \
+  go mod verify && go test ./... && go run . ../.. && \
+  go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+    ../../.github/workflows/*.yml)
 ```
 
 The contract scripts check TLS, HTTPS access to the Go proxy, required tools,
