@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import json
+import posixpath
 import shlex
 import sys
 from typing import Any, Callable
@@ -18,6 +19,24 @@ ALTERNATE_SOCKET = "/run/lab-docker/docker.sock"
 ALTERNATE_SOCKET_MAPPING = f"{ALTERNATE_SOCKET}:{ALTERNATE_SOCKET}"
 INERT_SOCKET_CHECK = "test ! -S /var/run/docker.sock"
 DOCKER_HOST = f"unix://{ALTERNATE_SOCKET}"
+MOUNT_FIELDS = {
+    "type",
+    "src",
+    "source",
+    "dst",
+    "destination",
+    "target",
+    "readonly",
+    "ro",
+    "volume-subpath",
+    "volume-nocopy",
+    "bind-propagation",
+    "consistency",
+    "tmpfs-size",
+    "tmpfs-mode",
+    "tmpfs-options",
+}
+MOUNT_FLAG_FIELDS = {"readonly", "ro", "volume-nocopy"}
 
 
 class YamlParseError(ValueError):
@@ -132,6 +151,8 @@ def _parse_scalar(value: str) -> Any:
         return True
     if value in {"false", "False", "FALSE"}:
         return False
+    if value.lstrip("-").isdigit():
+        return int(value)
     return value
 
 
@@ -346,6 +367,31 @@ def _base_guard_failures(document: Any, path: Path, job_name: str) -> list[str]:
         )
     if "if" in first:
         failures.append(f"{path}: jobs.{job_name}.steps[0].if must not make the guard skippable")
+    if "shell" in first:
+        failures.append(f"{path}: jobs.{job_name}.steps[0].shell must not override the guard shell")
+    if "if" in job:
+        failures.append(f"{path}: jobs.{job_name}.if must not make the guard job skippable")
+    if "continue-on-error" in job:
+        failures.append(f"{path}: jobs.{job_name}.continue-on-error must not override the guard")
+    defaults = job.get("defaults")
+    if isinstance(defaults, dict):
+        run_defaults = defaults.get("run")
+        if isinstance(run_defaults, dict) and "shell" in run_defaults:
+            failures.append(f"{path}: jobs.{job_name}.defaults.run.shell must not override the guard shell")
+        elif run_defaults is not None and not isinstance(run_defaults, dict):
+            failures.append(f"{path}: jobs.{job_name}.defaults.run must be absent for the guard")
+    elif defaults is not None:
+        failures.append(f"{path}: jobs.{job_name}.defaults must not override the guard shell")
+    workflow_defaults = document.get("defaults") if isinstance(document, dict) else None
+    if isinstance(document, dict) and "defaults" in document:
+        if not isinstance(workflow_defaults, dict):
+            failures.append(f"{path}: workflow defaults must be a mapping for the guard")
+        elif "run" in workflow_defaults:
+            workflow_run_defaults = workflow_defaults["run"]
+            if not isinstance(workflow_run_defaults, dict):
+                failures.append(f"{path}: workflow defaults.run must be a mapping for the guard")
+            elif "shell" in workflow_run_defaults:
+                failures.append(f"{path}: workflow defaults.run.shell must not override the guard shell")
     return failures
 
 
@@ -372,20 +418,59 @@ def _docker_contract_failures(document: Any, path: Path, job_name: str) -> list[
 
 
 def _default_socket_mapping(value: Any) -> bool:
-    return isinstance(value, str) and value.split(":", 1)[0].strip() in DEFAULT_SOCKETS
+    if not isinstance(value, str):
+        return False
+    if ":" not in value:
+        return False
+    source = value.split(":", 1)[0].strip()
+    if source.startswith("/"):
+        source = posixpath.normpath("/" + source.lstrip("/"))
+    else:
+        source = posixpath.normpath(source)
+    return source in DEFAULT_SOCKETS
 
 
 def _dynamic_socket_policy_value(value: Any) -> bool:
-    return isinstance(value, str) and "${{" in value
+    return isinstance(value, str) and ("${{" in value or "$" in value)
+
+
+def _unsafe_mount_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return "unknown or non-string value"
+    if not value.strip():
+        return "empty value"
+    if _dynamic_socket_policy_value(value):
+        return "dynamic expression"
+    if value.lstrip().startswith("!"):
+        return "YAML tag"
+    if "&" in value or "*" in value:
+        return "YAML anchor or alias"
+    return None
+
+
+def _volume_mapping_issue(value: Any) -> str | None:
+    unsafe = _unsafe_mount_value(value)
+    if unsafe:
+        return unsafe
+    assert isinstance(value, str)
+    if ":" not in value:
+        return None
+    source = value.split(":", 1)[0].strip()
+    if not source:
+        return "empty host source"
+    if not source.startswith("/") and ("/" in source or source in {".", ".."}):
+        return "unknown relative host source"
+    return None
 
 
 def _default_socket_in_options(options: Any) -> tuple[bool, str | None]:
     if options is None:
-        return False, None
+        return False, "options must be a string"
     if not isinstance(options, str):
         return False, "options must be a string"
-    if _dynamic_socket_policy_value(options):
-        return False, "options contains a dynamic expression"
+    unsafe = _unsafe_mount_value(options)
+    if unsafe:
+        return False, f"options contains an unsafe {unsafe}"
     try:
         tokens = shlex.split(options)
     except ValueError as error:
@@ -397,22 +482,50 @@ def _default_socket_in_options(options: Any) -> tuple[bool, str | None]:
         if token in {"--volume", "-v", "--mount"}:
             if index + 1 < len(tokens):
                 value = tokens[index + 1]
+            else:
+                return False, f"{token} is missing its mount value"
         elif token.startswith(("--volume=", "-v=", "--mount=")):
             option, value = token.split("=", 1)
         elif token.startswith("-v/"):
             option, value = "-v", token[2:]
         elif token.startswith("--volume/"):
             option, value = "--volume", token[len("--volume") :]
+        elif token.startswith(("--volume", "--mount", "-v")):
+            return False, f"unrecognized mount option {token!r}"
 
         if value is None:
             continue
-        if option in {"--volume", "-v"} and _default_socket_mapping(value):
-            return True, None
+        if option in {"--volume", "-v"}:
+            issue = _volume_mapping_issue(value)
+            if issue:
+                return False, f"mount option contains an unsafe {issue}"
+            if value.startswith("-"):
+                return False, "mount option has an unknown value"
+            if _default_socket_mapping(value):
+                return True, None
         if option == "--mount":
+            unsafe = _unsafe_mount_value(value)
+            if unsafe:
+                return False, f"mount option contains an unsafe {unsafe}"
+            if value.startswith("-"):
+                return False, "mount option has an unknown value"
             for field in value.split(","):
                 key, separator, field_value = field.partition("=")
-                if separator and key in {"src", "source"} and field_value.strip() in DEFAULT_SOCKETS:
-                    return True, None
+                key = key.strip()
+                if not separator:
+                    if key not in MOUNT_FLAG_FIELDS:
+                        return False, f"mount option has an unknown field {key!r}"
+                    continue
+                if key not in MOUNT_FIELDS:
+                    return False, f"mount option has an unknown field {key!r}"
+                if key in {"src", "source"}:
+                    issue = _volume_mapping_issue(field_value.strip() + ":/target")
+                    if issue:
+                        return False, f"mount source contains an unsafe {issue}"
+                    if _default_socket_mapping(field_value.strip() + ":/target"):
+                        return True, None
+                elif not field_value.strip() and key not in MOUNT_FLAG_FIELDS:
+                    return False, f"mount option field {key!r} has an empty value"
     return False, None
 
 
@@ -425,52 +538,89 @@ def _default_socket_mapping_failures(document: Any, path: Path) -> list[str]:
         if not isinstance(job, dict):
             continue
         container = job.get("container")
+        if "container" in job and not isinstance(container, dict):
+            failures.append(
+                f"{path}: jobs.{job_name}.container contains an unknown or non-mapping value"
+            )
         if isinstance(container, dict):
-            volumes = container.get("volumes")
+            if "<<" in container:
+                failures.append(
+                    f"{path}: jobs.{job_name}.container must not use YAML merge aliases"
+                )
+            if "volumes" in container:
+                volumes = container["volumes"]
+            else:
+                volumes = None
             if isinstance(volumes, list):
                 for volume in volumes:
-                    if _dynamic_socket_policy_value(volume):
-                        failures.append(f"{path}: jobs.{job_name}.container.volumes contains a dynamic socket policy value")
+                    issue = _volume_mapping_issue(volume)
+                    if issue:
+                        failures.append(f"{path}: jobs.{job_name}.container.volumes contains an unsafe {issue}")
                     elif _default_socket_mapping(volume):
                         failures.append(f"{path}: jobs.{job_name}.container.volumes maps the host default Docker socket")
-            elif _dynamic_socket_policy_value(volumes):
-                failures.append(f"{path}: jobs.{job_name}.container.volumes contains a dynamic socket policy value")
-            found, parse_error = _default_socket_in_options(container.get("options"))
-            if parse_error:
-                failures.append(f"{path}: jobs.{job_name}.container.options is invalid: {parse_error}")
-            elif found:
-                failures.append(f"{path}: jobs.{job_name}.container.options maps the host default Docker socket")
+            elif "volumes" in container:
+                failures.append(f"{path}: jobs.{job_name}.container.volumes contains an unknown or non-list value")
+            if "options" in container:
+                found, parse_error = _default_socket_in_options(container["options"])
+                if parse_error:
+                    failures.append(f"{path}: jobs.{job_name}.container.options is invalid: {parse_error}")
+                elif found:
+                    failures.append(f"{path}: jobs.{job_name}.container.options maps the host default Docker socket")
 
         services = job.get("services")
+        if "services" in job and not isinstance(services, dict):
+            failures.append(
+                f"{path}: jobs.{job_name}.services contains an unknown or non-mapping value"
+            )
+            continue
         if not isinstance(services, dict):
             continue
         for service_name, service in services.items():
             if not isinstance(service, dict):
+                failures.append(
+                    f"{path}: jobs.{job_name}.services.{service_name} contains an unknown or non-mapping value"
+                )
                 continue
-            service_volumes = service.get("volumes")
+            if "<<" in service:
+                failures.append(
+                    f"{path}: jobs.{job_name}.services.{service_name} must not use YAML merge aliases"
+                )
+            if "volumes" in service:
+                service_volumes = service["volumes"]
+            else:
+                service_volumes = None
             if isinstance(service_volumes, list):
                 for volume in service_volumes:
-                    if _dynamic_socket_policy_value(volume):
+                    issue = _volume_mapping_issue(volume)
+                    if issue:
                         failures.append(
-                            f"{path}: jobs.{job_name}.services.{service_name}.volumes contains a dynamic socket policy value"
+                            f"{path}: jobs.{job_name}.services.{service_name}.volumes contains an unsafe {issue}"
                         )
                     elif _default_socket_mapping(volume):
                         failures.append(
                             f"{path}: jobs.{job_name}.services.{service_name}.volumes maps the host default Docker socket"
                         )
-            elif _dynamic_socket_policy_value(service_volumes):
+            elif "volumes" in service:
                 failures.append(
-                    f"{path}: jobs.{job_name}.services.{service_name}.volumes contains a dynamic socket policy value"
+                    f"{path}: jobs.{job_name}.services.{service_name}.volumes contains an unknown or non-list value"
                 )
-            found, parse_error = _default_socket_in_options(service.get("options"))
-            if parse_error:
-                failures.append(
-                    f"{path}: jobs.{job_name}.services.{service_name}.options is invalid: {parse_error}"
-                )
-            elif found:
-                failures.append(
-                    f"{path}: jobs.{job_name}.services.{service_name}.options maps the host default Docker socket"
-                )
+            if "options" in service:
+                found, parse_error = _default_socket_in_options(service["options"])
+                if parse_error:
+                    failures.append(
+                        f"{path}: jobs.{job_name}.services.{service_name}.options is invalid: {parse_error}"
+                    )
+                elif found:
+                    failures.append(
+                        f"{path}: jobs.{job_name}.services.{service_name}.options maps the host default Docker socket"
+                    )
+    return failures
+
+
+def _require_failure_count(document: Any, path: Path, minimum: int) -> list[str]:
+    failures = _default_socket_mapping_failures(document, path)
+    if len(failures) < minimum:
+        return [f"{path}: expected at least {minimum} structural socket failures, got {len(failures)}"]
     return failures
 
 
@@ -480,8 +630,11 @@ def _negative_fixture_failures() -> list[str]:
         (
             "comment-only base guard",
             """
+on:
+  workflow_dispatch:
 jobs:
   smoke-base:
+    runs-on: ubuntu-24.04
     steps:
       # test ! -S /var/run/docker.sock
       - uses: actions/checkout@v6
@@ -491,8 +644,11 @@ jobs:
         (
             "wrong step and run block",
             """
+on:
+  workflow_dispatch:
 jobs:
   smoke-base:
+    runs-on: ubuntu-24.04
     steps:
       - name: Lookalike
         run: |
@@ -726,8 +882,11 @@ jobs:
         (
             "continue-on-error true on guard",
             """
+on:
+  workflow_dispatch:
 jobs:
   smoke-base:
+    runs-on: ubuntu-24.04
     steps:
       - run: test ! -S /var/run/docker.sock
         continue-on-error: true
@@ -745,6 +904,7 @@ on:
         type: boolean
 jobs:
   smoke-base:
+    runs-on: ubuntu-24.04
     steps:
       - run: test ! -S /var/run/docker.sock
         continue-on-error: ${{ inputs.allow_failure }}
@@ -754,11 +914,309 @@ jobs:
         (
             "conditional guard",
             """
+on:
+  workflow_dispatch:
 jobs:
   smoke-base:
+    runs-on: ubuntu-24.04
     steps:
       - run: test ! -S /var/run/docker.sock
         if: ${{ always() }}
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "lexically normalized default volume paths",
+            """
+name: lexical volume fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      volumes:
+        - /run/./docker.sock:/mnt/docker.sock
+        - /run//docker.sock:/mnt/docker.sock
+        - /run/../run/docker.sock:/mnt/docker.sock
+        - /var/run/./docker.sock:/mnt/docker.sock
+        - /var/run//docker.sock:/mnt/docker.sock
+        - /var/run/../run/docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _require_failure_count(document, path, 6),
+        ),
+        (
+            "lexically normalized default option paths",
+            """
+name: lexical option fixture
+on:
+  workflow_dispatch:
+jobs:
+  long-separated-dot:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --volume /run/./docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+  long-equals-double:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --volume=/run//docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+  short-attached-dot:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: -v/var/run/./docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+  short-equals-double:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: -v=/var/run//docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+  mount-separated-parent:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --mount type=bind,src=/run/../run/docker.sock,dst=/mnt/docker.sock
+    steps:
+      - run: echo test
+  mount-equals-parent:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --mount=type=bind,source=/var/run/../run/docker.sock,target=/mnt/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _require_failure_count(document, path, 6),
+        ),
+        (
+            "lexically normalized service paths",
+            """
+name: lexical service fixture
+on:
+  workflow_dispatch:
+jobs:
+  volume:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        volumes:
+          - /run/./docker.sock:/run/docker.sock
+          - /var/run//docker.sock:/var/run/docker.sock
+    steps:
+      - run: echo test
+  options:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        options: --mount type=bind,src=/run/../run/docker.sock,dst=/run/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _require_failure_count(document, path, 3),
+        ),
+        (
+            "YAML aliases in mount-bearing fields",
+            """
+name: alias fixture
+on:
+  workflow_dispatch:
+jobs:
+  container-alias:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: &safe_options --volume /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
+      volumes:
+        - &safe_volume /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
+    steps:
+      - run: echo test
+  service-alias:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        options: *safe_options
+        volumes:
+          - *safe_volume
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _require_failure_count(document, path, 4),
+        ),
+        (
+            "YAML aliases wrapping container and service mappings",
+            """
+name: alias mapping fixture
+on:
+  workflow_dispatch:
+jobs:
+  container-anchor:
+    runs-on: ubuntu-24.04
+    container: &unsafe_container {image: alpine:3.20, options: '--volume /run/docker.sock:/mnt/docker.sock'}
+    steps:
+      - run: echo test
+  container-alias:
+    runs-on: ubuntu-24.04
+    container: *unsafe_container
+    steps:
+      - run: echo test
+  service-anchor:
+    runs-on: ubuntu-24.04
+    services:
+      docker: &unsafe_service {image: docker:27, options: '--volume /run/docker.sock:/mnt/docker.sock'}
+    steps:
+      - run: echo test
+  service-alias:
+    runs-on: ubuntu-24.04
+    services:
+      docker: *unsafe_service
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _require_failure_count(document, path, 4),
+        ),
+        (
+            "unknown container mount option value",
+            """
+name: unknown option fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --volume
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "unknown relative host paths",
+            """
+name: relative path fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --volume ../run/docker.sock:/mnt/docker.sock
+      volumes:
+        - ./run/docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _require_failure_count(document, path, 2),
+        ),
+        (
+            "step shell override on guard",
+            """
+on:
+  workflow_dispatch:
+jobs:
+  smoke-base:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test ! -S /var/run/docker.sock
+        shell: bash
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "job defaults shell override on guard",
+            """
+on:
+  workflow_dispatch:
+jobs:
+  smoke-base:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: test ! -S /var/run/docker.sock
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "workflow defaults shell override on guard",
+            """
+on:
+  workflow_dispatch:
+defaults:
+  run:
+    shell: bash
+jobs:
+  smoke-base:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test ! -S /var/run/docker.sock
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "workflow defaults shell alias on guard",
+            """
+on:
+  workflow_dispatch:
+jobs:
+  anchor:
+    runs-on: ubuntu-24.04
+    defaults:
+      run: &unsafe_run {shell: bash}
+    steps:
+      - run: echo anchor
+  smoke-base:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test ! -S /var/run/docker.sock
+defaults:
+  run: *unsafe_run
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "job if condition on guard",
+            """
+on:
+  workflow_dispatch:
+jobs:
+  smoke-base:
+    runs-on: ubuntu-24.04
+    if: ${{ always() }}
+    steps:
+      - run: test ! -S /var/run/docker.sock
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "job continue-on-error on guard",
+            """
+on:
+  workflow_dispatch:
+jobs:
+  smoke-base:
+    runs-on: ubuntu-24.04
+    continue-on-error: false
+    steps:
+      - run: test ! -S /var/run/docker.sock
 """,
             lambda document, path: _base_guard_failures(document, path, "smoke-base"),
         ),
@@ -806,8 +1264,11 @@ jobs:
         (
             "literal false guard",
             """
+on:
+  workflow_dispatch:
 jobs:
   smoke-base:
+    runs-on: ubuntu-24.04
     steps:
       - run: test ! -S /var/run/docker.sock
         continue-on-error: false
