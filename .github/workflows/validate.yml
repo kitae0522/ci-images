@@ -20,6 +20,7 @@ jobs:
           dockerfile: "images/*/Dockerfile"
           recursive: true
           config: .hadolint.yaml
+      - run: python3 tests/workflow-socket-policy-test.py
       - run: python3 tests/workflow-trivy-version-checker-test.py
       - run: python3 tests/workflow-trivy-version-test.py
       - run: scripts/build-and-test.sh

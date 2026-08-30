@@ -18,6 +18,8 @@ jobs:
         --cgroup-parent docker-workloads-ci.slice
     timeout-minutes: 10
     steps:
+      - name: Assert default Docker socket is inert
+        run: test ! -S /var/run/docker.sock
       - name: Hold the image slot
         run: |
           test -s /etc/ssl/certs/ca-certificates.crt

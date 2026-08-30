@@ -3,6 +3,8 @@ jobs:
     runs-on: [self-hosted, lab, linux, x64, container, lab-small]
     container:
       image: ghcr.io/kitae0522/ci-ubuntu-docker:24.04
+      env:
+        DOCKER_HOST: unix:///run/lab-docker/docker.sock
       options: >-
         --cpus 1.5
         --memory 2560m
@@ -10,7 +12,7 @@ jobs:
         --cgroup-parent docker-workloads-ci.slice
       # Trusted private workflows only: this socket grants effective host root.
       volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
+        - /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

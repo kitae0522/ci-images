@@ -22,6 +22,15 @@ The images deliberately exclude Go, Node.js, Rust, Java, project database
 clients, cloud CLIs, credentials, private source, SSH keys, Nix secrets, and a
 Docker daemon. Workflows choose language versions with `setup-*` actions.
 
+The upstream Actions runner automatically mounts `/var/run/docker.sock` into
+container jobs. This repository relocates the real daemon socket, so that
+automatic mount is intentionally inert: lab base-image smoke fails when the
+path is a usable socket, and workflows must not add a host mapping for it. A
+Docker-enabled job opts in through the alternate `/run/lab-docker/docker.sock`
+path and sets `DOCKER_HOST` to that same path. That opt-in still gives the job
+effective root control of the Docker host, so it is limited to trusted private
+workflows.
+
 ## Tags and reproducibility
 
 - `:candidate-<sha7>-<run_id>-<run_attempt>` is the immutable, run-unique
@@ -66,8 +75,9 @@ this sequence:
    documents an owner, justification, and expiration; that exception is copied
    to the workflow summary.
 3. Two read-only `lab-small` jobs consume the exact published digests, not a
-   mutable tag. The base smoke repeats the base contract; the Docker smoke
-   mounts the socket explicitly and repeats both contracts.
+   mutable tag. The base smoke asserts the default socket is inert and repeats
+   the base contract; the Docker smoke opts into the alternate socket and
+   repeats both contracts.
 4. The dependent GitHub-hosted promotion job creates the dated tag if absent
    and moves `:24.04` to the smoke-tested candidate digest.
 
