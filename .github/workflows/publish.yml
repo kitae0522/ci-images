@@ -47,45 +47,26 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - name: Report HIGH vulnerabilities in base image
-        id: scan-high-base
-        continue-on-error: true
+      - name: Scan base image for HIGH vulnerabilities
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           image-ref: ci-ubuntu-base:test
           severity: HIGH
-          exit-code: "1"
-      - name: Report HIGH vulnerabilities in Docker image
-        id: scan-high-docker
-        continue-on-error: true
+          format: json
+          output: base.high.json
+          exit-code: "0"
+      - name: Scan Docker image for HIGH vulnerabilities
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           image-ref: ci-ubuntu-docker:test
           severity: HIGH
-          exit-code: "1"
+          format: json
+          output: docker.high.json
+          exit-code: "0"
       - name: Enforce HIGH vulnerability policy
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          HIGH_EXCEPTION: ${{ inputs.high_vulnerability_exception }}
-          BASE_SCAN_OUTCOME: ${{ steps.scan-high-base.outcome }}
-          DOCKER_SCAN_OUTCOME: ${{ steps.scan-high-docker.outcome }}
-        run: |
-          if [[ "$BASE_SCAN_OUTCOME" != failure && "$DOCKER_SCAN_OUTCOME" != failure ]]; then
-            exit 0
-          fi
-          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
-            echo "HIGH vulnerabilities block push and schedule releases." >&2
-            exit 1
-          fi
-          if [[ -z "${HIGH_EXCEPTION//[[:space:]]/}" ]]; then
-            echo "A non-empty documented exception is required for HIGH vulnerabilities." >&2
-            exit 1
-          fi
-          {
-            echo "## HIGH vulnerability exception"
-            echo
-            echo "$HIGH_EXCEPTION"
-          } >>"$GITHUB_STEP_SUMMARY"
+          HIGH_VULNERABILITY_EXCEPTION: ${{ inputs.high_vulnerability_exception }}
+        run: scripts/high-vulnerability-policy.sh base.high.json docker.high.json
       - name: Generate base SBOM
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:

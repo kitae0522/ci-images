@@ -24,8 +24,9 @@ Docker daemon. Workflows choose language versions with `setup-*` actions.
 
 ## Tags and reproducibility
 
-- `:sha-abcdef1-<run-id>-<attempt>` is the immutable, run-unique candidate
-  tag. It includes the source SHA, `GITHUB_RUN_ID`, and `GITHUB_RUN_ATTEMPT`.
+- `:candidate-<sha7>-<run_id>-<run_attempt>` is the immutable, run-unique
+  candidate tag. It includes the source SHA, `GITHUB_RUN_ID`, and
+  `GITHUB_RUN_ATTEMPT`.
 - `:24.04-YYYYMMDD` is an immutable dated release and is never overwritten.
 - `:24.04` is the rolling stable tag, moved only after lab smoke succeeds.
 - An image digest (`@sha256:...`) is the strongest reproducibility reference.
@@ -56,7 +57,7 @@ release, weekly rebuild (`17 19 * * 0`), or authorized manual dispatch follows
 this sequence:
 
 1. A GitHub-hosted candidate job builds both images and publishes the
-   run-unique tag `sha-<7-char-source-sha>-<run-id>-<attempt>` to GHCR. It
+   run-unique tag `candidate-<sha7>-<run_id>-<run_attempt>` to GHCR. It
    emits the exact base and Docker manifest digests plus provenance and
    CycloneDX SBOM attestations.
 2. `HIGH` findings are scanned and reported for both images. Push and

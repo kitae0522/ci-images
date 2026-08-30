@@ -17,19 +17,53 @@ if [[ "$1" == buildx && "$2" == imagetools && "$3" == inspect ]]; then
       exit 0
       ;;
     missing)
-      printf 'ERROR: no such manifest: %s\n' "${4:?}" >&2
+      printf 'ERROR: %s: not found\n' "${4:?}" >&2
       exit 1
       ;;
-    registry)
-      printf 'ERROR: registry request failed: resource not found\n' >&2
+    mixed)
+      if [[ "${4:?}" == *ci-ubuntu-base:* ]]; then
+        printf 'ERROR: no such manifest: %s\n' "$4" >&2
+        exit 1
+      fi
+      exit 0
+      ;;
+    mixed-reverse)
+      if [[ "${4:?}" == *ci-ubuntu-base:* ]]; then
+        exit 0
+      fi
+      printf 'ERROR: no such manifest: %s\n' "$4" >&2
       exit 1
       ;;
-    auth)
-      printf 'ERROR: unauthorized: authentication required\n' >&2
+    second-registry)
+      if [[ "${4:?}" == *ci-ubuntu-base:* ]]; then
+        printf 'ERROR: no such manifest: %s\n' "$4" >&2
+      else
+        printf 'ERROR: registry request failed: resource not found\n' >&2
+      fi
       exit 1
       ;;
-    network)
-      printf 'ERROR: dial tcp: network is unreachable\n' >&2
+    second-auth)
+      if [[ "${4:?}" == *ci-ubuntu-base:* ]]; then
+        printf 'ERROR: no such manifest: %s\n' "$4" >&2
+      else
+        printf 'ERROR: unauthorized: authentication required\n' >&2
+      fi
+      exit 1
+      ;;
+    second-network)
+      if [[ "${4:?}" == *ci-ubuntu-base:* ]]; then
+        printf 'ERROR: no such manifest: %s\n' "$4" >&2
+      else
+        printf 'ERROR: dial tcp: network is unreachable\n' >&2
+      fi
+      exit 1
+      ;;
+    second-unknown)
+      if [[ "${4:?}" == *ci-ubuntu-base:* ]]; then
+        printf 'ERROR: no such manifest: %s\n' "$4" >&2
+      else
+        printf 'ERROR: unexpected error: not found\n' >&2
+      fi
       exit 1
       ;;
     *)
@@ -48,29 +82,46 @@ run_promote() {
     "$repo_root/scripts/promote.sh" sha256:base sha256:docker
 }
 
+count_commands() {
+  local pattern="$1" log="$2"
+  grep -c "$pattern" "$log" || true
+}
+
 date_tag="24.04-$(date -u +%Y%m%d)"
 
 run_promote existing "$tmp/existing.log"
-test "$(grep -c '^buildx imagetools inspect ' "$tmp/existing.log")" -eq 2
-test "$(grep -c "^buildx imagetools create -t .*:$date_tag " "$tmp/existing.log")" -eq 0
-test "$(grep -c '^buildx imagetools create -t .*:24.04 ' "$tmp/existing.log")" -eq 2
+test "$(count_commands '^buildx imagetools inspect ' "$tmp/existing.log")" -eq 2
+test "$(count_commands "^buildx imagetools create -t .*:$date_tag " "$tmp/existing.log")" -eq 0
+test "$(count_commands '^buildx imagetools create -t .*:24.04 ' "$tmp/existing.log")" -eq 2
 
 run_promote missing "$tmp/missing.log"
-test "$(grep -c '^buildx imagetools inspect ' "$tmp/missing.log")" -eq 2
-test "$(grep -c "^buildx imagetools create -t .*:$date_tag " "$tmp/missing.log")" -eq 2
-test "$(grep -c '^buildx imagetools create -t .*:24.04 ' "$tmp/missing.log")" -eq 2
+test "$(count_commands '^buildx imagetools inspect ' "$tmp/missing.log")" -eq 2
+test "$(count_commands "^buildx imagetools create -t .*:$date_tag " "$tmp/missing.log")" -eq 2
+test "$(count_commands '^buildx imagetools create -t .*:24.04 ' "$tmp/missing.log")" -eq 2
+second_inspect_line="$(grep -n -F 'buildx imagetools inspect ghcr.io/kitae0522/ci-ubuntu-docker:' "$tmp/missing.log" | cut -d: -f1)"
+first_create_line="$(grep -n -F "buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-base:$date_tag " "$tmp/missing.log" | cut -d: -f1)"
+test "$second_inspect_line" -lt "$first_create_line"
 for image in ghcr.io/kitae0522/ci-ubuntu-base ghcr.io/kitae0522/ci-ubuntu-docker; do
   dated_line="$(grep -n -F "buildx imagetools create -t $image:$date_tag " "$tmp/missing.log" | cut -d: -f1)"
   stable_line="$(grep -n -F "buildx imagetools create -t $image:24.04 " "$tmp/missing.log" | cut -d: -f1)"
   test "$dated_line" -lt "$stable_line"
 done
 
-for mode in registry auth network; do
+for mode in mixed mixed-reverse; do
+  if run_promote "$mode" "$tmp/$mode.log" 2>"$tmp/$mode.err"; then
+    echo "promotion unexpectedly succeeded for $mode dated-tag state" >&2
+    exit 1
+  fi
+  test "$(count_commands '^buildx imagetools inspect ' "$tmp/$mode.log")" -eq 2
+  test "$(count_commands '^buildx imagetools create ' "$tmp/$mode.log")" -eq 0
+done
+
+for mode in second-registry second-auth second-network second-unknown; do
   log="$tmp/$mode.log"
-  if run_promote "$mode" "$log"; then
+  if run_promote "$mode" "$log" 2>"$tmp/$mode.err"; then
     echo "promotion unexpectedly succeeded for $mode" >&2
     exit 1
   fi
-  test "$(grep -c '^buildx imagetools inspect ' "$log")" -eq 1
-  test "$(grep -c '^buildx imagetools create ' "$log" || true)" -eq 0
+  test "$(count_commands '^buildx imagetools inspect ' "$log")" -eq 2
+  test "$(count_commands '^buildx imagetools create ' "$log")" -eq 0
 done

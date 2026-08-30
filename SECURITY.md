@@ -2,6 +2,10 @@
 
 ## Runner trust boundary
 
+Candidate references use the immutable format
+`candidate-<sha7>-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>`; lab smoke consumes the
+published digest rather than a tag.
+
 The `lab` runner is reserved for trusted, protected-repository revisions. Fork-
 controlled code must never select the `lab` labels, and the public
 `ci-images` repository never runs `pull_request` or `pull_request_target` code on

@@ -49,12 +49,12 @@ cp "$MOCK_DOCKER_LOG" "$tmp/first.log"
 run_publish 100 2 "$tmp/second.output"
 cp "$MOCK_DOCKER_LOG" "$tmp/second.log"
 
-grep -Fq 'candidate_tag=sha-0123456-100-1' "$tmp/first.output"
-grep -Fq 'candidate_tag=sha-0123456-100-2' "$tmp/second.output"
-grep -Fq 'tag ci-ubuntu-base:test ghcr.io/kitae0522/ci-ubuntu-base:sha-0123456-100-1' "$tmp/first.log"
-grep -Fq 'tag ci-ubuntu-docker:test ghcr.io/kitae0522/ci-ubuntu-docker:sha-0123456-100-1' "$tmp/first.log"
-grep -Fq 'tag ci-ubuntu-base:test ghcr.io/kitae0522/ci-ubuntu-base:sha-0123456-100-2' "$tmp/second.log"
-grep -Fq 'tag ci-ubuntu-docker:test ghcr.io/kitae0522/ci-ubuntu-docker:sha-0123456-100-2' "$tmp/second.log"
+grep -Fq 'candidate_tag=candidate-0123456-100-1' "$tmp/first.output"
+grep -Fq 'candidate_tag=candidate-0123456-100-2' "$tmp/second.output"
+grep -Fq 'tag ci-ubuntu-base:test ghcr.io/kitae0522/ci-ubuntu-base:candidate-0123456-100-1' "$tmp/first.log"
+grep -Fq 'tag ci-ubuntu-docker:test ghcr.io/kitae0522/ci-ubuntu-docker:candidate-0123456-100-1' "$tmp/first.log"
+grep -Fq 'tag ci-ubuntu-base:test ghcr.io/kitae0522/ci-ubuntu-base:candidate-0123456-100-2' "$tmp/second.log"
+grep -Fq 'tag ci-ubuntu-docker:test ghcr.io/kitae0522/ci-ubuntu-docker:candidate-0123456-100-2' "$tmp/second.log"
 
 test "$(grep -c '^tag ci-ubuntu-base:test ' "$tmp/first.log")" -eq 1
 test "$(grep -c '^tag ci-ubuntu-base:test ' "$tmp/second.log")" -eq 1
