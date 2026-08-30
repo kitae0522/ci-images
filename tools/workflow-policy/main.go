@@ -80,18 +80,18 @@ func violationWithCode(code, path, job, format string, args ...any) Violation {
 func normalizePolicyPath(path string) string {
 	// Policy paths are repository-root-relative. Do not search for an embedded
 	// marker: a nested path or a traversal must never impersonate an allowlisted
-	// workflow. Backslashes are treated as separators for cross-platform calls.
-	slash := strings.ReplaceAll(path, "\\", "/")
-	if slash == "" || pathpkg.IsAbs(slash) || strings.HasPrefix(slash, "/") ||
-		(len(slash) >= 2 && slash[1] == ':') {
+	// workflow. Backslashes are not valid repository-relative separators and are
+	// rejected rather than normalized across platforms.
+	if path == "" || strings.Contains(path, "\\") || pathpkg.IsAbs(path) || strings.HasPrefix(path, "/") ||
+		(len(path) >= 2 && path[1] == ':') {
 		return ""
 	}
-	for _, component := range strings.Split(slash, "/") {
+	for _, component := range strings.Split(path, "/") {
 		if component == ".." {
 			return ""
 		}
 	}
-	cleaned := pathpkg.Clean(slash)
+	cleaned := pathpkg.Clean(path)
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return ""
 	}
@@ -464,7 +464,7 @@ func parseErrors(path string, errors []*actionlint.Error) []Violation {
 }
 
 func CheckWorkflow(path string, source []byte) []Violation {
-	originalPath := strings.ReplaceAll(path, "\\", "/")
+	originalPath := path
 	path = normalizePolicyPath(path)
 	if path == "" {
 		return []Violation{violationWithCode("workflow_not_allowlisted", originalPath, "", "workflow or template is not allowlisted")}
@@ -506,16 +506,123 @@ func CheckWorkflow(path string, source []byte) []Violation {
 	return violations
 }
 
+type policyPathIssue struct {
+	code    string
+	path    string
+	message string
+}
+
+func (issue *policyPathIssue) Error() string {
+	return issue.message
+}
+
+// checkPolicyPathComponents verifies each path component with Lstat, so a
+// symlink in an ancestor cannot redirect discovery outside the repository.
+// Missing paths are returned unchanged so callers can preserve the existing
+// optional-directory behavior; all existing symlinks and non-directory
+// ancestors produce an explicit policy issue.
+func checkPolicyPathComponents(root, target string, targetMustBeDir bool) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil {
+		return err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return &policyPathIssue{
+			code:    "policy_path_outside_root",
+			path:    filepath.ToSlash(relative),
+			message: "policy path escapes repository root",
+		}
+	}
+
+	rootInfo, err := os.Lstat(rootAbs)
+	if err != nil {
+		return err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 {
+		return &policyPathIssue{
+			code:    "policy_symlink",
+			path:    ".",
+			message: "symbolic links are not allowed in policy paths",
+		}
+	}
+	if !rootInfo.IsDir() {
+		return &policyPathIssue{
+			code:    "policy_path_not_directory",
+			path:    ".",
+			message: "repository root must be a directory",
+		}
+	}
+	if relative == "." {
+		if targetMustBeDir {
+			return nil
+		}
+		return nil
+	}
+
+	current := rootAbs
+	components := strings.Split(relative, string(filepath.Separator))
+	relativeSoFar := make([]string, 0, len(components))
+	for index, component := range components {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		relativeSoFar = append(relativeSoFar, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return statErr
+		}
+		policyPath := filepath.ToSlash(filepath.Join(relativeSoFar...))
+		if info.Mode()&os.ModeSymlink != 0 {
+			return &policyPathIssue{
+				code:    "policy_symlink",
+				path:    policyPath,
+				message: "symbolic links are not allowed in policy paths",
+			}
+		}
+		last := index == len(components)-1
+		if !last || targetMustBeDir {
+			if !info.IsDir() {
+				return &policyPathIssue{
+					code:    "policy_path_not_directory",
+					path:    policyPath,
+					message: "policy path component is not a directory",
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func policyPathViolation(err error, fallbackPath string) Violation {
+	var issue *policyPathIssue
+	if errors.As(err, &issue) {
+		return violationWithCode(issue.code, issue.path, "", "%s", issue.message)
+	}
+	return violationWithCode("policy_enumeration_failed", fallbackPath, "", "unable to enumerate policy files: %v", err)
+}
+
 func discoverPolicyFiles(root string) (map[string][]byte, []Violation) {
 	files := make(map[string][]byte)
 	var violations []Violation
-	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return files, []Violation{violationWithCode("policy_symlink", filepath.ToSlash(root), "", "symbolic links are not allowed in policy paths")}
+	if err := checkPolicyPathComponents(root, root, true); err != nil && !os.IsNotExist(err) {
+		return files, []Violation{policyPathViolation(err, ".")}
 	}
 	for _, directory := range []string{".github/workflows", "templates"} {
 		base := filepath.Join(root, directory)
-		if info, err := os.Lstat(base); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			violations = append(violations, violationWithCode("policy_symlink", filepath.ToSlash(directory), "", "symbolic links are not allowed in policy paths"))
+		if err := checkPolicyPathComponents(root, base, true); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			violations = append(violations, policyPathViolation(err, filepath.ToSlash(directory)))
 			continue
 		}
 		walkError := filepath.WalkDir(base, func(path string, entry fs.DirEntry, err error) error {
@@ -536,6 +643,17 @@ func discoverPolicyFiles(root string) (map[string][]byte, []Violation) {
 			extension := strings.ToLower(filepath.Ext(entry.Name()))
 			if extension != ".yml" && extension != ".yaml" {
 				return nil
+			}
+			if pathErr := checkPolicyPathComponents(root, path, false); pathErr != nil {
+				if os.IsNotExist(pathErr) {
+					return pathErr
+				}
+				var issue *policyPathIssue
+				if errors.As(pathErr, &issue) {
+					violations = append(violations, policyPathViolation(pathErr, filepath.ToSlash(directory)))
+					return nil
+				}
+				return pathErr
 			}
 			relative, err := filepath.Rel(root, path)
 			if err != nil {
