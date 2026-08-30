@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -59,6 +60,7 @@ var workflowContracts = map[string]map[string]jobContract{
 }
 
 type Violation struct {
+	Code    string
 	Path    string
 	Job     string
 	Message string
@@ -71,18 +73,29 @@ func (v Violation) Error() string {
 	return fmt.Sprintf("%s#%s: %s", v.Path, v.Job, v.Message)
 }
 
-func violation(path, job, format string, args ...any) Violation {
-	return Violation{Path: path, Job: job, Message: fmt.Sprintf(format, args...)}
+func violationWithCode(code, path, job, format string, args ...any) Violation {
+	return Violation{Code: code, Path: path, Job: job, Message: fmt.Sprintf(format, args...)}
 }
 
 func normalizePolicyPath(path string) string {
-	path = filepath.ToSlash(path)
-	for _, marker := range []string{".github/workflows/", "templates/"} {
-		if index := strings.Index(path, marker); index >= 0 {
-			return path[index:]
+	// Policy paths are repository-root-relative. Do not search for an embedded
+	// marker: a nested path or a traversal must never impersonate an allowlisted
+	// workflow. Backslashes are treated as separators for cross-platform calls.
+	slash := strings.ReplaceAll(path, "\\", "/")
+	if slash == "" || pathpkg.IsAbs(slash) || strings.HasPrefix(slash, "/") ||
+		(len(slash) >= 2 && slash[1] == ':') {
+		return ""
+	}
+	for _, component := range strings.Split(slash, "/") {
+		if component == ".." {
+			return ""
 		}
 	}
-	return strings.TrimPrefix(path, "./")
+	cleaned := pathpkg.Clean(slash)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return ""
+	}
+	return cleaned
 }
 
 func isTemplatePath(path string) bool {
@@ -192,17 +205,17 @@ func stringValue(value *actionlint.String) (string, bool) {
 
 func checkRunner(path, jobName string, job *actionlint.Job, expected []string) []Violation {
 	if job.RunsOn == nil {
-		return []Violation{violation(path, jobName, "runs-on must be explicitly allowlisted")}
+		return []Violation{violationWithCode("runner_missing", path, jobName, "runs-on must be explicitly allowlisted")}
 	}
 	if job.RunsOn.LabelsExpr != nil || job.RunsOn.Group != nil {
-		return []Violation{violation(path, jobName, "runs-on expressions and runner groups are not allowed")}
+		return []Violation{violationWithCode("runner_dynamic", path, jobName, "runs-on expressions and runner groups are not allowed")}
 	}
 	if len(job.RunsOn.Labels) != len(expected) {
-		return []Violation{violation(path, jobName, "runs-on labels must exactly equal %v", expected)}
+		return []Violation{violationWithCode("runner_mismatch", path, jobName, "runs-on labels must exactly equal %v", expected)}
 	}
 	for index, label := range job.RunsOn.Labels {
 		if label == nil || label.Value != expected[index] || containsDynamic(label.Value) {
-			return []Violation{violation(path, jobName, "runs-on labels must exactly equal %v", expected)}
+			return []Violation{violationWithCode("runner_mismatch", path, jobName, "runs-on labels must exactly equal %v", expected)}
 		}
 	}
 	return nil
@@ -211,12 +224,12 @@ func checkRunner(path, jobName string, job *actionlint.Job, expected []string) [
 func checkContainerKeys(path, jobName string, rawContainer *yaml.Node, allowed map[string]bool) []Violation {
 	entries, ok := mappingEntries(rawContainer)
 	if !ok {
-		return []Violation{violation(path, jobName, "container must be a mapping")}
+		return []Violation{violationWithCode("container_mapping_invalid", path, jobName, "container must be a mapping")}
 	}
 	var violations []Violation
 	for key := range entries {
 		if !allowed[key] {
-			violations = append(violations, violation(path, jobName, "container.%s is not part of the closed contract", key))
+			violations = append(violations, violationWithCode("container_key_forbidden", path, jobName, "container.%s is not part of the closed contract", key))
 		}
 	}
 	return violations
@@ -225,7 +238,7 @@ func checkContainerKeys(path, jobName string, rawContainer *yaml.Node, allowed m
 func checkImage(path, jobName string, container *actionlint.Container, expected string) []Violation {
 	actual, ok := stringValue(container.Image)
 	if !ok || actual != expected {
-		return []Violation{violation(path, jobName, "container.image must exactly equal %q", expected)}
+		return []Violation{violationWithCode("container_image_mismatch", path, jobName, "container.image must exactly equal %q", expected)}
 	}
 	return nil
 }
@@ -233,17 +246,17 @@ func checkImage(path, jobName string, container *actionlint.Container, expected 
 func checkResourceOptions(path, jobName string, container *actionlint.Container) []Violation {
 	actual, ok := stringValue(container.Options)
 	if !ok || actual != resourceOptions || containsDynamic(actual) {
-		return []Violation{violation(path, jobName, "container.options must exactly equal %q", resourceOptions)}
+		return []Violation{violationWithCode("container_options_mismatch", path, jobName, "container.options must exactly equal %q", resourceOptions)}
 	}
 	return nil
 }
 
 func checkNoServices(path, jobName string, job *actionlint.Job, rawJob *yaml.Node) []Violation {
 	if job.Services != nil {
-		return []Violation{violation(path, jobName, "services are forbidden for lab jobs")}
+		return []Violation{violationWithCode("services_forbidden", path, jobName, "services are forbidden for lab jobs")}
 	}
 	if _, found := mappingField(rawJob, "services"); found {
-		return []Violation{violation(path, jobName, "services are forbidden for lab jobs")}
+		return []Violation{violationWithCode("services_forbidden", path, jobName, "services are forbidden for lab jobs")}
 	}
 	return nil
 }
@@ -251,10 +264,10 @@ func checkNoServices(path, jobName string, job *actionlint.Job, rawJob *yaml.Nod
 func checkRawContainerField(path, jobName string, rawContainer *yaml.Node, field string, expectedKind yaml.Kind) (*yaml.Node, []Violation) {
 	node, found := mappingField(rawContainer, field)
 	if !found {
-		return nil, []Violation{violation(path, jobName, "container.%s is required by the closed contract", field)}
+		return nil, []Violation{violationWithCode("container_field_missing", path, jobName, "container.%s is required by the closed contract", field)}
 	}
 	if node == nil || node.Kind != expectedKind {
-		return nil, []Violation{violation(path, jobName, "container.%s has an unknown value", field)}
+		return nil, []Violation{violationWithCode("container_field_invalid", path, jobName, "container.%s has an unknown value", field)}
 	}
 	return node, nil
 }
@@ -262,47 +275,47 @@ func checkRawContainerField(path, jobName string, rawContainer *yaml.Node, field
 func checkGuard(path, jobName string, workflow *actionlint.Workflow, job *actionlint.Job, rawRoot, rawJob *yaml.Node) []Violation {
 	var violations []Violation
 	if len(job.Steps) == 0 || job.Steps[0] == nil {
-		return []Violation{violation(path, jobName, "steps must start with the inert Docker socket guard")}
+		return []Violation{violationWithCode("guard_missing", path, jobName, "steps must start with the inert Docker socket guard")}
 	}
 	first := job.Steps[0]
 	run, isRun := first.Exec.(*actionlint.ExecRun)
 	if !isRun || run == nil || run.Run == nil || run.Run.Value != inertSocketCheck {
-		violations = append(violations, violation(path, jobName, "steps[0].run must exactly equal %q", inertSocketCheck))
+		violations = append(violations, violationWithCode("guard_step_mismatch", path, jobName, "steps[0].run must exactly equal %q", inertSocketCheck))
 	} else {
 		if run.Shell != nil {
-			violations = append(violations, violation(path, jobName, "steps[0].shell must not override the guard shell"))
+			violations = append(violations, violationWithCode("guard_step_shell_forbidden", path, jobName, "steps[0].shell must not override the guard shell"))
 		}
 		if run.WorkingDirectory != nil {
-			violations = append(violations, violation(path, jobName, "steps[0].working-directory must not override the guard"))
+			violations = append(violations, violationWithCode("guard_step_working_directory_forbidden", path, jobName, "steps[0].working-directory must not override the guard"))
 		}
 	}
 	rawFirstStep, rawFirstStepFound := rawFirstStep(rawJob)
 	if first.If != nil || (rawFirstStepFound && hasMappingField(rawFirstStep, "if")) {
-		violations = append(violations, violation(path, jobName, "steps[0].if must not make the guard skippable"))
+		violations = append(violations, violationWithCode("guard_step_if_forbidden", path, jobName, "steps[0].if must not make the guard skippable"))
 	}
 	if first.Env != nil || (rawFirstStepFound && hasMappingField(rawFirstStep, "env")) {
-		violations = append(violations, violation(path, jobName, "steps[0].env must not override the guard"))
+		violations = append(violations, violationWithCode("guard_step_env_forbidden", path, jobName, "steps[0].env must not override the guard"))
 	}
 	if first.ContinueOnError != nil || (rawFirstStepFound && hasMappingField(rawFirstStep, "continue-on-error")) {
-		violations = append(violations, violation(path, jobName, "steps[0].continue-on-error must not override the guard"))
+		violations = append(violations, violationWithCode("guard_step_continue_forbidden", path, jobName, "steps[0].continue-on-error must not override the guard"))
 	}
 	if first.TimeoutMinutes != nil || (rawFirstStepFound && hasMappingField(rawFirstStep, "timeout-minutes")) {
-		violations = append(violations, violation(path, jobName, "steps[0].timeout-minutes must not override the guard"))
+		violations = append(violations, violationWithCode("guard_step_timeout_forbidden", path, jobName, "steps[0].timeout-minutes must not override the guard"))
 	}
 	if job.If != nil || hasMappingField(rawJob, "if") {
-		violations = append(violations, violation(path, jobName, "job.if must not make the guard skippable"))
+		violations = append(violations, violationWithCode("guard_job_if_forbidden", path, jobName, "job.if must not make the guard skippable"))
 	}
 	if job.ContinueOnError != nil || hasMappingField(rawJob, "continue-on-error") {
-		violations = append(violations, violation(path, jobName, "job.continue-on-error must not override the guard"))
+		violations = append(violations, violationWithCode("guard_job_continue_forbidden", path, jobName, "job.continue-on-error must not override the guard"))
 	}
 	if job.Defaults != nil || hasMappingField(rawJob, "defaults") {
-		violations = append(violations, violation(path, jobName, "job.defaults must not override the guard shell"))
+		violations = append(violations, violationWithCode("guard_job_defaults_forbidden", path, jobName, "job.defaults must not override the guard shell"))
 	}
 	if job.Strategy != nil || hasMappingField(rawJob, "strategy") {
-		violations = append(violations, violation(path, jobName, "job.strategy must not modify guarded execution"))
+		violations = append(violations, violationWithCode("guard_job_strategy_forbidden", path, jobName, "job.strategy must not modify guarded execution"))
 	}
 	if workflow.Defaults != nil || hasMappingField(rawRoot, "defaults") {
-		violations = append(violations, violation(path, jobName, "workflow.defaults must not override the guard shell"))
+		violations = append(violations, violationWithCode("guard_workflow_defaults_forbidden", path, jobName, "workflow.defaults must not override the guard shell"))
 	}
 	return violations
 }
@@ -328,11 +341,11 @@ func checkLabBase(path, jobName string, contract jobContract, workflow *actionli
 	violations := checkRunner(path, jobName, job, labLabels)
 	violations = append(violations, checkNoServices(path, jobName, job, rawJob)...)
 	if job.Container == nil {
-		return append(violations, violation(path, jobName, "container is required for lab-base jobs"))
+		return append(violations, violationWithCode("container_required", path, jobName, "container is required for lab-base jobs"))
 	}
 	rawContainer, found := mappingField(rawJob, "container")
 	if !found || rawContainer == nil || rawContainer.Kind != yaml.MappingNode {
-		violations = append(violations, violation(path, jobName, "container must be an explicit mapping"))
+		violations = append(violations, violationWithCode("container_mapping_invalid", path, jobName, "container must be an explicit mapping"))
 	} else {
 		violations = append(violations, checkContainerKeys(path, jobName, rawContainer, map[string]bool{
 			"image":       true,
@@ -352,19 +365,19 @@ func checkLabBase(path, jobName string, contract jobContract, workflow *actionli
 func checkDockerEnvironment(path, jobName string, container *actionlint.Container, rawContainer *yaml.Node) []Violation {
 	var violations []Violation
 	if container.Env == nil || container.Env.Expression != nil {
-		violations = append(violations, violation(path, jobName, "container.env must contain only DOCKER_HOST"))
+		violations = append(violations, violationWithCode("docker_env_invalid", path, jobName, "container.env must contain only DOCKER_HOST"))
 	} else if len(container.Env.Vars) != 1 {
-		violations = append(violations, violation(path, jobName, "container.env must contain only DOCKER_HOST"))
+		violations = append(violations, violationWithCode("docker_env_keys", path, jobName, "container.env must contain only DOCKER_HOST"))
 	} else if envVar, ok := container.Env.Vars["docker_host"]; !ok || envVar == nil || envVar.Value == nil || envVar.Value.Value != dockerHost || containsDynamic(envVar.Value.Value) {
-		violations = append(violations, violation(path, jobName, "container.env.DOCKER_HOST must exactly equal %q", dockerHost))
+		violations = append(violations, violationWithCode("docker_env_value", path, jobName, "container.env.DOCKER_HOST must exactly equal %q", dockerHost))
 	}
 	envNode, found := mappingField(rawContainer, "env")
 	if !found || envNode == nil || envNode.Kind != yaml.MappingNode {
-		violations = append(violations, violation(path, jobName, "container.env must be an explicit mapping"))
+		violations = append(violations, violationWithCode("docker_env_invalid", path, jobName, "container.env must be an explicit mapping"))
 	} else if entries, ok := mappingEntries(envNode); !ok || len(entries) != 1 {
-		violations = append(violations, violation(path, jobName, "container.env must contain exactly one variable"))
+		violations = append(violations, violationWithCode("docker_env_keys", path, jobName, "container.env must contain exactly one variable"))
 	} else if value, ok := mappingField(envNode, "DOCKER_HOST"); !ok || value == nil || value.Kind != yaml.ScalarNode || value.Value != dockerHost || containsDynamic(value.Value) {
-		violations = append(violations, violation(path, jobName, "container.env.DOCKER_HOST must exactly equal %q", dockerHost))
+		violations = append(violations, violationWithCode("docker_env_value", path, jobName, "container.env.DOCKER_HOST must exactly equal %q", dockerHost))
 	}
 	return violations
 }
@@ -375,11 +388,11 @@ func checkDockerVolumes(path, jobName string, rawContainer *yaml.Node) []Violati
 		return violations
 	}
 	if len(volumesNode.Content) != 1 {
-		return []Violation{violation(path, jobName, "container.volumes must contain exactly the alternate socket mapping")}
+		return []Violation{violationWithCode("docker_volume_count", path, jobName, "container.volumes must contain exactly the alternate socket mapping")}
 	}
 	volume := volumesNode.Content[0]
 	if volume == nil || volume.Kind != yaml.ScalarNode || volume.Value != alternateVolume || containsDynamic(volume.Value) {
-		return []Violation{violation(path, jobName, "container.volumes must contain only %q", alternateVolume)}
+		return []Violation{violationWithCode("docker_volume_mismatch", path, jobName, "container.volumes must contain only %q", alternateVolume)}
 	}
 	return nil
 }
@@ -388,11 +401,11 @@ func checkLabDocker(path, jobName string, contract jobContract, job *actionlint.
 	violations := checkRunner(path, jobName, job, labLabels)
 	violations = append(violations, checkNoServices(path, jobName, job, rawJob)...)
 	if job.Container == nil {
-		return append(violations, violation(path, jobName, "container is required for lab-docker jobs"))
+		return append(violations, violationWithCode("container_required", path, jobName, "container is required for lab-docker jobs"))
 	}
 	rawContainer, found := mappingField(rawJob, "container")
 	if !found || rawContainer == nil || rawContainer.Kind != yaml.MappingNode {
-		violations = append(violations, violation(path, jobName, "container must be an explicit mapping"))
+		violations = append(violations, violationWithCode("container_mapping_invalid", path, jobName, "container must be an explicit mapping"))
 	} else {
 		violations = append(violations, checkContainerKeys(path, jobName, rawContainer, map[string]bool{
 			"image":       true,
@@ -412,20 +425,20 @@ func checkLabDocker(path, jobName string, contract jobContract, job *actionlint.
 func checkHosted(path, jobName string, job *actionlint.Job, rawJob *yaml.Node) []Violation {
 	violations := checkRunner(path, jobName, job, []string{"ubuntu-24.04"})
 	if job.Container != nil || hasMappingField(rawJob, "container") {
-		violations = append(violations, violation(path, jobName, "container is forbidden for hosted jobs"))
+		violations = append(violations, violationWithCode("hosted_container_forbidden", path, jobName, "container is forbidden for hosted jobs"))
 	}
 	if job.Services != nil || hasMappingField(rawJob, "services") {
-		violations = append(violations, violation(path, jobName, "services are forbidden for hosted jobs"))
+		violations = append(violations, violationWithCode("hosted_services_forbidden", path, jobName, "services are forbidden for hosted jobs"))
 	}
 	return violations
 }
 
 func checkJob(path, jobName string, contract jobContract, workflow *actionlint.Workflow, job *actionlint.Job, rawRoot, rawJob *yaml.Node) []Violation {
 	if job == nil {
-		return []Violation{violation(path, jobName, "allowlisted job is missing")}
+		return []Violation{violationWithCode("job_missing", path, jobName, "allowlisted job is missing")}
 	}
 	if rawJob == nil || rawJob.Kind != yaml.MappingNode {
-		return []Violation{violation(path, jobName, "job must be a mapping")}
+		return []Violation{violationWithCode("job_mapping_invalid", path, jobName, "job must be a mapping")}
 	}
 	switch contract.kind {
 	case hostedContract:
@@ -435,7 +448,7 @@ func checkJob(path, jobName string, contract jobContract, workflow *actionlint.W
 	case labDockerContract:
 		return checkLabDocker(path, jobName, contract, job, rawJob)
 	default:
-		return []Violation{violation(path, jobName, "unknown contract kind")}
+		return []Violation{violationWithCode("contract_unknown", path, jobName, "unknown contract kind")}
 	}
 }
 
@@ -445,27 +458,31 @@ func parseErrors(path string, errors []*actionlint.Error) []Violation {
 		if parseError == nil {
 			continue
 		}
-		violations = append(violations, violation(path, "", "actionlint %s at line %d column %d: %s", parseError.Kind, parseError.Line, parseError.Column, parseError.Message))
+		violations = append(violations, violationWithCode("actionlint_parse_error", path, "", "actionlint %s at line %d column %d: %s", parseError.Kind, parseError.Line, parseError.Column, parseError.Message))
 	}
 	return violations
 }
 
 func CheckWorkflow(path string, source []byte) []Violation {
+	originalPath := strings.ReplaceAll(path, "\\", "/")
 	path = normalizePolicyPath(path)
+	if path == "" {
+		return []Violation{violationWithCode("workflow_not_allowlisted", originalPath, "", "workflow or template is not allowlisted")}
+	}
 	contract, knownPath := workflowContracts[path]
 	if !knownPath {
-		return []Violation{violation(path, "", "workflow or template is not allowlisted")}
+		return []Violation{violationWithCode("workflow_not_allowlisted", path, "", "workflow or template is not allowlisted")}
 	}
 
 	workflow, actionlintErrors := parseActionlint(path, source)
 	violations := parseErrors(path, actionlintErrors)
 	rawRoot, rawError := parseRawDocument(source)
 	if rawError != nil {
-		violations = append(violations, violation(path, "", "YAML parse failed: %v", rawError))
+		violations = append(violations, violationWithCode("yaml_parse_failed", path, "", "YAML document parse failed: %v", rawError))
 		return violations
 	}
 	if containsUnsafeYAMLFeature(rawRoot, make(map[*yaml.Node]bool)) {
-		violations = append(violations, violation(path, "", "YAML anchors, aliases, and custom tags are not allowed in policy files"))
+		violations = append(violations, violationWithCode("yaml_unsafe", path, "", "YAML anchors, aliases, and custom tags are not allowed in policy files"))
 	}
 	if workflow == nil {
 		return violations
@@ -474,11 +491,11 @@ func CheckWorkflow(path string, source []byte) []Violation {
 	rawJobs, jobsMapping := mappingField(rawRoot, "jobs")
 	rawJobEntries, rawJobsAreMapping := mappingEntries(rawJobs)
 	if !jobsMapping || !rawJobsAreMapping {
-		return append(violations, violation(path, "", "jobs must be an explicit mapping"))
+		return append(violations, violationWithCode("jobs_mapping_invalid", path, "", "jobs must be an explicit mapping"))
 	}
 	for jobName := range rawJobEntries {
 		if _, expected := contract[jobName]; !expected {
-			violations = append(violations, violation(path, jobName, "job is not in the closed allowlist"))
+			violations = append(violations, violationWithCode("job_not_allowlisted", path, jobName, "job is not in the closed allowlist"))
 		}
 	}
 	for jobName, jobContract := range contract {
@@ -492,11 +509,26 @@ func CheckWorkflow(path string, source []byte) []Violation {
 func discoverPolicyFiles(root string) (map[string][]byte, []Violation) {
 	files := make(map[string][]byte)
 	var violations []Violation
+	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return files, []Violation{violationWithCode("policy_symlink", filepath.ToSlash(root), "", "symbolic links are not allowed in policy paths")}
+	}
 	for _, directory := range []string{".github/workflows", "templates"} {
 		base := filepath.Join(root, directory)
+		if info, err := os.Lstat(base); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			violations = append(violations, violationWithCode("policy_symlink", filepath.ToSlash(directory), "", "symbolic links are not allowed in policy paths"))
+			continue
+		}
 		walkError := filepath.WalkDir(base, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				relative, relErr := filepath.Rel(root, path)
+				if relErr != nil {
+					return relErr
+				}
+				violations = append(violations, violationWithCode("policy_symlink", filepath.ToSlash(relative), "", "symbolic links are not allowed in policy paths"))
+				return nil
 			}
 			if entry.IsDir() {
 				return nil
@@ -510,6 +542,9 @@ func discoverPolicyFiles(root string) (map[string][]byte, []Violation) {
 				return err
 			}
 			policyPath := filepath.ToSlash(relative)
+			if normalizePolicyPath(policyPath) != policyPath {
+				return fmt.Errorf("non-canonical policy path %q", policyPath)
+			}
 			contents, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -521,7 +556,7 @@ func discoverPolicyFiles(root string) (map[string][]byte, []Violation) {
 			if os.IsNotExist(walkError) {
 				continue
 			}
-			violations = append(violations, violation(directory, "", "unable to enumerate policy files: %v", walkError))
+			violations = append(violations, violationWithCode("policy_enumeration_failed", directory, "", "unable to enumerate policy files: %v", walkError))
 		}
 	}
 	return files, violations
@@ -544,7 +579,7 @@ func CheckRepository(root string) []Violation {
 	sort.Strings(expectedPaths)
 	for _, path := range expectedPaths {
 		if _, found := files[path]; !found {
-			violations = append(violations, violation(path, "", "allowlisted workflow or template is missing"))
+			violations = append(violations, violationWithCode("workflow_missing", path, "", "allowlisted workflow or template is missing"))
 		}
 	}
 	return violations
