@@ -137,6 +137,8 @@ jobs:
         --pids-limit 768
         --cgroup-parent docker-workloads-ci.slice
     steps:
+      - name: Assert default Docker socket is inert
+        run: test ! -S /var/run/docker.sock
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: tests/base-contract.sh
 
@@ -152,13 +154,15 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+      env:
+        DOCKER_HOST: unix:///run/lab-docker/docker.sock
       options: >-
         --cpus 1.5
         --memory 2560m
         --pids-limit 768
         --cgroup-parent docker-workloads-ci.slice
       volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
+        - /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: tests/base-contract.sh

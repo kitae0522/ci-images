@@ -17,10 +17,19 @@ lab smoke jobs remain limited to `contents: read` and `packages: read`.
 
 ## Docker socket
 
-Mounting `/var/run/docker.sock` grants the job effective root access to the
-Docker host. The Docker image does not include a daemon; only trusted private
-workflows may use the socket-mounted template. Ordinary workflows must use the
-base image and must not add the socket.
+The upstream Actions runner automatically mounts `/var/run/docker.sock` into
+container jobs. The real daemon socket is relocated, making that automatic
+mount intentionally inert. The default path is not an authorization
+mechanism: base-image lab smoke explicitly fails if it is a usable socket, and
+this repository rejects workflow or template mappings to that path.
+
+Docker-enabled jobs must opt in with the alternate host socket at
+`/run/lab-docker/docker.sock` and set `DOCKER_HOST` to
+`unix:///run/lab-docker/docker.sock`. The Docker image contains client tools
+only, not a daemon. An opted-in job still has effective root control of the
+Docker host, so only trusted private workflows may use the socket-enabled
+template. Ordinary workflows must use the base image and must not add either
+socket mapping.
 
 ## Image contents and releases
 
