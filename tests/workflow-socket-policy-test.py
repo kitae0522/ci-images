@@ -375,11 +375,17 @@ def _default_socket_mapping(value: Any) -> bool:
     return isinstance(value, str) and value.split(":", 1)[0].strip() in DEFAULT_SOCKETS
 
 
+def _dynamic_socket_policy_value(value: Any) -> bool:
+    return isinstance(value, str) and "${{" in value
+
+
 def _default_socket_in_options(options: Any) -> tuple[bool, str | None]:
     if options is None:
         return False, None
     if not isinstance(options, str):
         return False, "options must be a string"
+    if _dynamic_socket_policy_value(options):
+        return False, "options contains a dynamic expression"
     try:
         tokens = shlex.split(options)
     except ValueError as error:
@@ -393,6 +399,10 @@ def _default_socket_in_options(options: Any) -> tuple[bool, str | None]:
                 value = tokens[index + 1]
         elif token.startswith(("--volume=", "-v=", "--mount=")):
             option, value = token.split("=", 1)
+        elif token.startswith("-v/"):
+            option, value = "-v", token[2:]
+        elif token.startswith("--volume/"):
+            option, value = "--volume", token[len("--volume") :]
 
         if value is None:
             continue
@@ -419,8 +429,12 @@ def _default_socket_mapping_failures(document: Any, path: Path) -> list[str]:
             volumes = container.get("volumes")
             if isinstance(volumes, list):
                 for volume in volumes:
-                    if _default_socket_mapping(volume):
+                    if _dynamic_socket_policy_value(volume):
+                        failures.append(f"{path}: jobs.{job_name}.container.volumes contains a dynamic socket policy value")
+                    elif _default_socket_mapping(volume):
                         failures.append(f"{path}: jobs.{job_name}.container.volumes maps the host default Docker socket")
+            elif _dynamic_socket_policy_value(volumes):
+                failures.append(f"{path}: jobs.{job_name}.container.volumes contains a dynamic socket policy value")
             found, parse_error = _default_socket_in_options(container.get("options"))
             if parse_error:
                 failures.append(f"{path}: jobs.{job_name}.container.options is invalid: {parse_error}")
@@ -436,10 +450,18 @@ def _default_socket_mapping_failures(document: Any, path: Path) -> list[str]:
             service_volumes = service.get("volumes")
             if isinstance(service_volumes, list):
                 for volume in service_volumes:
-                    if _default_socket_mapping(volume):
+                    if _dynamic_socket_policy_value(volume):
+                        failures.append(
+                            f"{path}: jobs.{job_name}.services.{service_name}.volumes contains a dynamic socket policy value"
+                        )
+                    elif _default_socket_mapping(volume):
                         failures.append(
                             f"{path}: jobs.{job_name}.services.{service_name}.volumes maps the host default Docker socket"
                         )
+            elif _dynamic_socket_policy_value(service_volumes):
+                failures.append(
+                    f"{path}: jobs.{job_name}.services.{service_name}.volumes contains a dynamic socket policy value"
+                )
             found, parse_error = _default_socket_in_options(service.get("options"))
             if parse_error:
                 failures.append(
@@ -543,6 +565,40 @@ jobs:
             lambda document, path: _default_socket_mapping_failures(document, path),
         ),
         (
+            "default socket in attached -v option",
+            """
+name: attached volume fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: -v/var/run/docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "default socket alias in attached -v option",
+            """
+name: attached alias volume fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: -v/run/docker.sock:/mnt/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
             "default socket in service volumes",
             """
 name: service volume fixture
@@ -574,6 +630,94 @@ jobs:
       docker:
         image: docker:27
         options: --mount type=bind,source=/run/docker.sock,target=/run/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "dynamic container options",
+            """
+name: dynamic container options fixture
+on:
+  workflow_dispatch:
+    inputs:
+      docker_options:
+        required: true
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: ${{ inputs.docker_options }}
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "dynamic container volume",
+            """
+name: dynamic container volume fixture
+on:
+  workflow_dispatch:
+    inputs:
+      docker_volume:
+        required: true
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      volumes:
+        - ${{ inputs.docker_volume }}
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "dynamic service options",
+            """
+name: dynamic service options fixture
+on:
+  workflow_dispatch:
+    inputs:
+      docker_options:
+        required: true
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        options: ${{ inputs.docker_options }}
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "dynamic service volume",
+            """
+name: dynamic service volume fixture
+on:
+  workflow_dispatch:
+    inputs:
+      docker_volume:
+        required: true
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        volumes:
+          - ${{ inputs.docker_volume }}
     steps:
       - run: echo test
 """,
@@ -647,6 +791,7 @@ jobs:
       options: >-
         --volume /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
         --mount type=bind,src=/run/lab-docker/docker.sock,dst=/run/lab-docker/docker.sock
+        -v/run/lab-docker/docker.sock:/run/lab-docker/docker.sock
     services:
       docker:
         image: docker:27
