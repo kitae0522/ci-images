@@ -35,29 +35,33 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: scripts/build-and-test.sh
-      - uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
           image-ref: ci-ubuntu-base:test
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
           image-ref: ci-ubuntu-docker:test
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
       - name: Scan base image for HIGH vulnerabilities
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
           image-ref: ci-ubuntu-base:test
           severity: HIGH
           format: json
           output: base.high.json
           exit-code: "0"
       - name: Scan Docker image for HIGH vulnerabilities
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
           image-ref: ci-ubuntu-docker:test
           severity: HIGH
           format: json
@@ -68,14 +72,16 @@ jobs:
           HIGH_VULNERABILITY_EXCEPTION: ${{ inputs.high_vulnerability_exception }}
         run: scripts/high-vulnerability-policy.sh base.high.json docker.high.json
       - name: Generate base SBOM
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
           image-ref: ci-ubuntu-base:test
           format: cyclonedx
           output: base.cdx.json
       - name: Generate Docker SBOM
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
           image-ref: ci-ubuntu-docker:test
           format: cyclonedx
           output: docker.cdx.json
