@@ -1,0 +1,2 @@
+ignored:
+  - DL3008 # APT packages intentionally refresh in weekly security rebuilds.

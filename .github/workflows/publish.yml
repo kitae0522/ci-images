@@ -1,0 +1,180 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '17 19 * * 0'
+  workflow_dispatch:
+    inputs:
+      high_vulnerability_exception:
+        description: >-
+          Document why HIGH findings are accepted, including an owner,
+          justification, and expiration date.
+        required: false
+        type: string
+
+concurrency:
+  group: ci-images-publish
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      candidate_tag: ${{ steps.publish.outputs.candidate_tag }}
+      base_digest: ${{ steps.publish.outputs.base_digest }}
+      docker_digest: ${{ steps.publish.outputs.docker_digest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: scripts/build-and-test.sh
+      - uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-base:test
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-docker:test
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan base image for HIGH vulnerabilities
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-base:test
+          severity: HIGH
+          format: json
+          output: base.high.json
+          exit-code: "0"
+      - name: Scan Docker image for HIGH vulnerabilities
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-docker:test
+          severity: HIGH
+          format: json
+          output: docker.high.json
+          exit-code: "0"
+      - name: Enforce HIGH vulnerability policy
+        env:
+          HIGH_VULNERABILITY_EXCEPTION: ${{ inputs.high_vulnerability_exception }}
+        run: scripts/high-vulnerability-policy.sh base.high.json docker.high.json
+      - name: Generate base SBOM
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-base:test
+          format: cyclonedx
+          output: base.cdx.json
+      - name: Generate Docker SBOM
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ci-ubuntu-docker:test
+          format: cyclonedx
+          output: docker.cdx.json
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: publish
+        run: scripts/publish-candidates.sh
+      - name: Attest base image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/kitae0522/ci-ubuntu-base
+          subject-digest: ${{ steps.publish.outputs.base_digest }}
+          push-to-registry: true
+      - name: Attest base image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/kitae0522/ci-ubuntu-base
+          subject-digest: ${{ steps.publish.outputs.base_digest }}
+          sbom-path: base.cdx.json
+          push-to-registry: true
+      - name: Attest Docker image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/kitae0522/ci-ubuntu-docker
+          subject-digest: ${{ steps.publish.outputs.docker_digest }}
+          push-to-registry: true
+      - name: Attest Docker image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ghcr.io/kitae0522/ci-ubuntu-docker
+          subject-digest: ${{ steps.publish.outputs.docker_digest }}
+          sbom-path: docker.cdx.json
+          push-to-registry: true
+
+  smoke-base:
+    needs: candidate
+    runs-on: [self-hosted, lab, linux, x64, container, lab-small]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/kitae0522/ci-ubuntu-base@${{ needs.candidate.outputs.base_digest }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: >-
+        --cpus 1.5
+        --memory 2560m
+        --pids-limit 768
+        --cgroup-parent docker-workloads-ci.slice
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: tests/base-contract.sh
+
+  smoke-docker:
+    needs: candidate
+    runs-on: [self-hosted, lab, linux, x64, container, lab-small]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/kitae0522/ci-ubuntu-docker@${{ needs.candidate.outputs.docker_digest }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: >-
+        --cpus 1.5
+        --memory 2560m
+        --pids-limit 768
+        --cgroup-parent docker-workloads-ci.slice
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: tests/base-contract.sh
+      - run: tests/docker-contract.sh
+        env:
+          EXPECT_DOCKER_SOCKET: "1"
+
+  promote:
+    needs: [candidate, smoke-base, smoke-docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          scripts/promote.sh \
+            "${{ needs.candidate.outputs.base_digest }}" \
+            "${{ needs.candidate.outputs.docker_digest }}"
