@@ -290,6 +290,7 @@ func TestUnknownWorkflowPathFailsClosed(t *testing.T) {
 	requireSpecificViolation(t, "templates/../.github/workflows/validate.yml", source, "workflow_not_allowlisted", "workflow or template is not allowlisted")
 	requireSpecificViolation(t, "../.github/workflows/validate.yml", source, "workflow_not_allowlisted", "workflow or template is not allowlisted")
 	requireSpecificViolation(t, ".github/workflows/unknown.yml", source, "workflow_not_allowlisted", "workflow or template is not allowlisted")
+	requireSpecificViolation(t, ".github\\workflows\\validate.yml", source, "workflow_not_allowlisted", "workflow or template is not allowlisted")
 }
 
 func TestUnsafeYAMLFeaturesFailClosed(t *testing.T) {
@@ -315,6 +316,96 @@ func TestRepositoryRejectsPolicySymlink(t *testing.T) {
 	}
 	_, violations := discoverPolicyFiles(root)
 	requireDiscoveryViolation(t, violations, "policy_symlink", "symbolic links are not allowed in policy paths")
+}
+
+func TestRepositoryRejectsAncestorPolicySymlinks(t *testing.T) {
+	tests := []struct {
+		name     string
+		linkPath []string
+	}{
+		{
+			name:     "github ancestor",
+			linkPath: []string{".github"},
+		},
+		{
+			name:     "templates ancestor",
+			linkPath: []string{"templates"},
+		},
+		{
+			name:     "workflows intermediate",
+			linkPath: []string{".github", "workflows"},
+		},
+		{
+			name:     "templates intermediate",
+			linkPath: []string{"templates", "nested"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-external")
+			t.Cleanup(func() { _ = os.RemoveAll(target) })
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(target, "validate.yml"), []byte("name: outside\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			link := filepath.Join(append([]string{root}, test.linkPath...)...)
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join("..", filepath.Base(target)), link); err != nil {
+				t.Fatal(err)
+			}
+
+			_, violations := discoverPolicyFiles(root)
+			requireDiscoveryViolation(t, violations, "policy_symlink", "symbolic links are not allowed in policy paths")
+		})
+	}
+}
+
+func TestRepositoryRejectsNonDirectoryPolicyComponents(t *testing.T) {
+	tests := []struct {
+		name       string
+		filePath   []string
+		parentPath []string
+	}{
+		{
+			name:       "github ancestor file",
+			filePath:   []string{".github"},
+			parentPath: nil,
+		},
+		{
+			name:       "workflows root file",
+			filePath:   []string{".github", "workflows"},
+			parentPath: []string{".github"},
+		},
+		{
+			name:       "templates root file",
+			filePath:   []string{"templates"},
+			parentPath: nil,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if len(test.parentPath) > 0 {
+				parent := filepath.Join(append([]string{root}, test.parentPath...)...)
+				if err := os.MkdirAll(parent, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			file := filepath.Join(append([]string{root}, test.filePath...)...)
+			if err := os.WriteFile(file, []byte("not a directory\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, violations := discoverPolicyFiles(root)
+			requireDiscoveryViolation(t, violations, "policy_path_not_directory", "policy path component is not a directory")
+		})
+	}
 }
 
 func TestRepositoryInventoryPasses(t *testing.T) {
