@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import json
+import shlex
 import sys
 from typing import Any, Callable
 
@@ -12,7 +13,7 @@ PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 CAPACITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "lab-capacity-smoke.yml"
 DOCKER_TEMPLATE = REPO_ROOT / "templates" / "docker-build.yml"
 
-DEFAULT_SOCKET = "/var/run/docker.sock"
+DEFAULT_SOCKETS = ("/var/run/docker.sock", "/run/docker.sock")
 ALTERNATE_SOCKET = "/run/lab-docker/docker.sock"
 ALTERNATE_SOCKET_MAPPING = f"{ALTERNATE_SOCKET}:{ALTERNATE_SOCKET}"
 INERT_SOCKET_CHECK = "test ! -S /var/run/docker.sock"
@@ -339,7 +340,13 @@ def _base_guard_failures(document: Any, path: Path, job_name: str) -> list[str]:
     actual = first.get("run") if isinstance(first, dict) else None
     if actual != INERT_SOCKET_CHECK:
         return [f"{path}: jobs.{job_name}.steps[0].run must be {INERT_SOCKET_CHECK!r}"]
-    return []
+    if "continue-on-error" in first and first["continue-on-error"] is not False:
+        failures.append(
+            f"{path}: jobs.{job_name}.steps[0].continue-on-error must be the literal false"
+        )
+    if "if" in first:
+        failures.append(f"{path}: jobs.{job_name}.steps[0].if must not make the guard skippable")
+    return failures
 
 
 def _docker_contract_failures(document: Any, path: Path, job_name: str) -> list[str]:
@@ -364,6 +371,41 @@ def _docker_contract_failures(document: Any, path: Path, job_name: str) -> list[
     return failures
 
 
+def _default_socket_mapping(value: Any) -> bool:
+    return isinstance(value, str) and value.split(":", 1)[0].strip() in DEFAULT_SOCKETS
+
+
+def _default_socket_in_options(options: Any) -> tuple[bool, str | None]:
+    if options is None:
+        return False, None
+    if not isinstance(options, str):
+        return False, "options must be a string"
+    try:
+        tokens = shlex.split(options)
+    except ValueError as error:
+        return False, str(error)
+
+    for index, token in enumerate(tokens):
+        value: str | None = None
+        option = token
+        if token in {"--volume", "-v", "--mount"}:
+            if index + 1 < len(tokens):
+                value = tokens[index + 1]
+        elif token.startswith(("--volume=", "-v=", "--mount=")):
+            option, value = token.split("=", 1)
+
+        if value is None:
+            continue
+        if option in {"--volume", "-v"} and _default_socket_mapping(value):
+            return True, None
+        if option == "--mount":
+            for field in value.split(","):
+                key, separator, field_value = field.partition("=")
+                if separator and key in {"src", "source"} and field_value.strip() in DEFAULT_SOCKETS:
+                    return True, None
+    return False, None
+
+
 def _default_socket_mapping_failures(document: Any, path: Path) -> list[str]:
     jobs, failures = _jobs(document, path)
     if failures:
@@ -373,19 +415,45 @@ def _default_socket_mapping_failures(document: Any, path: Path) -> list[str]:
         if not isinstance(job, dict):
             continue
         container = job.get("container")
-        if not isinstance(container, dict):
+        if isinstance(container, dict):
+            volumes = container.get("volumes")
+            if isinstance(volumes, list):
+                for volume in volumes:
+                    if _default_socket_mapping(volume):
+                        failures.append(f"{path}: jobs.{job_name}.container.volumes maps the host default Docker socket")
+            found, parse_error = _default_socket_in_options(container.get("options"))
+            if parse_error:
+                failures.append(f"{path}: jobs.{job_name}.container.options is invalid: {parse_error}")
+            elif found:
+                failures.append(f"{path}: jobs.{job_name}.container.options maps the host default Docker socket")
+
+        services = job.get("services")
+        if not isinstance(services, dict):
             continue
-        volumes = container.get("volumes")
-        if not isinstance(volumes, list):
-            continue
-        for volume in volumes:
-            if isinstance(volume, str) and volume.split(":", 1)[0].strip() == DEFAULT_SOCKET:
-                failures.append(f"{path}: jobs.{job_name}.container.volumes maps the host default Docker socket")
+        for service_name, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            service_volumes = service.get("volumes")
+            if isinstance(service_volumes, list):
+                for volume in service_volumes:
+                    if _default_socket_mapping(volume):
+                        failures.append(
+                            f"{path}: jobs.{job_name}.services.{service_name}.volumes maps the host default Docker socket"
+                        )
+            found, parse_error = _default_socket_in_options(service.get("options"))
+            if parse_error:
+                failures.append(
+                    f"{path}: jobs.{job_name}.services.{service_name}.options is invalid: {parse_error}"
+                )
+            elif found:
+                failures.append(
+                    f"{path}: jobs.{job_name}.services.{service_name}.options maps the host default Docker socket"
+                )
     return failures
 
 
 def _negative_fixture_failures() -> list[str]:
-    """Ensure lookalike comments and misplaced values cannot satisfy policy."""
+    """Ensure lookalikes, socket aliases, and skippable guards cannot pass."""
     fixtures: list[tuple[str, str, Callable[[Any, Path], list[str]]]] = [
         (
             "comment-only base guard",
@@ -440,6 +508,116 @@ jobs:
 """,
             lambda document, path: _docker_contract_failures(document, path, "test"),
         ),
+        (
+            "default socket in container --volume option",
+            """
+name: socket option fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "default socket in container --mount option",
+            """
+name: socket mount fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: --mount type=bind,src=/run/docker.sock,dst=/run/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "default socket in service volumes",
+            """
+name: service volume fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "default socket in service --mount option",
+            """
+name: service mount fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      docker:
+        image: docker:27
+        options: --mount type=bind,source=/run/docker.sock,target=/run/docker.sock
+    steps:
+      - run: echo test
+""",
+            lambda document, path: _default_socket_mapping_failures(document, path),
+        ),
+        (
+            "continue-on-error true on guard",
+            """
+jobs:
+  smoke-base:
+    steps:
+      - run: test ! -S /var/run/docker.sock
+        continue-on-error: true
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "dynamic continue-on-error on guard",
+            """
+on:
+  workflow_dispatch:
+    inputs:
+      allow_failure:
+        required: false
+        type: boolean
+jobs:
+  smoke-base:
+    steps:
+      - run: test ! -S /var/run/docker.sock
+        continue-on-error: ${{ inputs.allow_failure }}
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+        (
+            "conditional guard",
+            """
+jobs:
+  smoke-base:
+    steps:
+      - run: test ! -S /var/run/docker.sock
+        if: ${{ always() }}
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
     ]
 
     failures: list[str] = []
@@ -453,6 +631,54 @@ jobs:
             continue
         if not rejected:
             failures.append(f"negative fixture {name!r} was unexpectedly accepted")
+
+    safe_fixtures = [
+        (
+            "alternate socket options and service values",
+            """
+name: safe socket fixture
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: alpine:3.20
+      options: >-
+        --volume /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
+        --mount type=bind,src=/run/lab-docker/docker.sock,dst=/run/lab-docker/docker.sock
+    services:
+      docker:
+        image: docker:27
+        volumes:
+          - /run/lab-docker/docker.sock:/run/lab-docker/docker.sock
+        options: --mount type=bind,source=/run/lab-docker/docker.sock,target=/run/lab-docker/docker.sock
+    steps:
+      - run: echo test
+""",
+            _default_socket_mapping_failures,
+        ),
+        (
+            "literal false guard",
+            """
+jobs:
+  smoke-base:
+    steps:
+      - run: test ! -S /var/run/docker.sock
+        continue-on-error: false
+""",
+            lambda document, path: _base_guard_failures(document, path, "smoke-base"),
+        ),
+    ]
+    for name, text, checker in safe_fixtures:
+        try:
+            document = parse_workflow(text)
+            accepted = checker(document, fixture_path)
+        except (TypeError, YamlParseError, ValueError) as error:
+            failures.append(f"safe fixture {name!r} could not be parsed: {error}")
+            continue
+        if accepted:
+            failures.append(f"safe fixture {name!r} was unexpectedly rejected: {accepted}")
     return failures
 
 
