@@ -20,6 +20,7 @@ jobs:
           dockerfile: "images/*/Dockerfile"
           recursive: true
           config: .hadolint.yaml
+      - run: python3 tests/workflow-trivy-version-checker-test.py
       - run: python3 tests/workflow-trivy-version-test.py
       - run: scripts/build-and-test.sh
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

@@ -9,6 +9,8 @@ import sys
 TRIVY_ACTION = re.compile(r"uses:\s+aquasecurity/trivy-action@[0-9a-f]{40}\b")
 TRIVY_VERSION = re.compile(r"(?m)^\s+version:\s+(v\d+\.\d+\.\d+)\s*$")
 STEP_START = re.compile(r"(?m)^      - ")
+EXPECTED_TRIVY_VERSION = "v0.74.0"
+EXPECTED_TRIVY_STEPS = 9
 
 
 def workflow_steps(workflow: Path) -> list[str]:
@@ -20,7 +22,9 @@ def main() -> int:
     failures: list[str] = []
     count = 0
 
-    for workflow in sorted(Path(".github/workflows").glob("*.yml")):
+    workflow_root = Path(".github/workflows")
+    workflows = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
+    for workflow in workflows:
         for index, step in enumerate(workflow_steps(workflow), start=1):
             if "aquasecurity/trivy-action@" not in step:
                 continue
@@ -33,10 +37,11 @@ def main() -> int:
             else:
                 versions.add(match.group(1))
 
-    if count == 0:
-        failures.append("no Trivy workflow steps found")
-    if len(versions) > 1:
-        failures.append(f"Trivy steps use multiple versions: {', '.join(sorted(versions))}")
+    if count != EXPECTED_TRIVY_STEPS:
+        failures.append(f"expected {EXPECTED_TRIVY_STEPS} Trivy steps, found {count}")
+    if versions != {EXPECTED_TRIVY_VERSION}:
+        found = ", ".join(sorted(versions)) or "none"
+        failures.append(f"expected only Trivy {EXPECTED_TRIVY_VERSION}, found: {found}")
 
     if failures:
         print("\n".join(failures), file=sys.stderr)
