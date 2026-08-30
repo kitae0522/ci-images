@@ -61,14 +61,18 @@ if (( base_dated_status != docker_dated_status )); then
 fi
 
 if (( base_dated_status == 1 )); then
-  docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-base:"$date_tag" \
+  docker buildx imagetools create --prefer-index=false \
+    -t ghcr.io/kitae0522/ci-ubuntu-base:"$date_tag" \
     ghcr.io/kitae0522/ci-ubuntu-base@"$base_digest"
-  docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-docker:"$date_tag" \
+  docker buildx imagetools create --prefer-index=false \
+    -t ghcr.io/kitae0522/ci-ubuntu-docker:"$date_tag" \
     ghcr.io/kitae0522/ci-ubuntu-docker@"$docker_digest"
 fi
 
 # Both dated-tag decisions are complete before either stable tag moves.
-docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-base:24.04 \
+docker buildx imagetools create --prefer-index=false \
+  -t ghcr.io/kitae0522/ci-ubuntu-base:24.04 \
   ghcr.io/kitae0522/ci-ubuntu-base@"$base_digest"
-docker buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-docker:24.04 \
+docker buildx imagetools create --prefer-index=false \
+  -t ghcr.io/kitae0522/ci-ubuntu-docker:24.04 \
   ghcr.io/kitae0522/ci-ubuntu-docker@"$docker_digest"

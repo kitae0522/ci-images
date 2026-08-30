@@ -91,19 +91,21 @@ date_tag="24.04-$(date -u +%Y%m%d)"
 
 run_promote existing "$tmp/existing.log"
 test "$(count_commands '^buildx imagetools inspect ' "$tmp/existing.log")" -eq 2
-test "$(count_commands "^buildx imagetools create -t .*:$date_tag " "$tmp/existing.log")" -eq 0
-test "$(count_commands '^buildx imagetools create -t .*:24.04 ' "$tmp/existing.log")" -eq 2
+test "$(count_commands "^buildx imagetools create --prefer-index=false -t .*:$date_tag " "$tmp/existing.log")" -eq 0
+test "$(count_commands '^buildx imagetools create --prefer-index=false -t .*:24.04 ' "$tmp/existing.log")" -eq 2
+test "$(count_commands '^buildx imagetools create --prefer-index=false -t ' "$tmp/existing.log")" -eq 2
 
 run_promote missing "$tmp/missing.log"
 test "$(count_commands '^buildx imagetools inspect ' "$tmp/missing.log")" -eq 2
-test "$(count_commands "^buildx imagetools create -t .*:$date_tag " "$tmp/missing.log")" -eq 2
-test "$(count_commands '^buildx imagetools create -t .*:24.04 ' "$tmp/missing.log")" -eq 2
+test "$(count_commands "^buildx imagetools create --prefer-index=false -t .*:$date_tag " "$tmp/missing.log")" -eq 2
+test "$(count_commands '^buildx imagetools create --prefer-index=false -t .*:24.04 ' "$tmp/missing.log")" -eq 2
+test "$(count_commands '^buildx imagetools create --prefer-index=false -t ' "$tmp/missing.log")" -eq 4
 second_inspect_line="$(grep -n -F 'buildx imagetools inspect ghcr.io/kitae0522/ci-ubuntu-docker:' "$tmp/missing.log" | cut -d: -f1)"
-first_create_line="$(grep -n -F "buildx imagetools create -t ghcr.io/kitae0522/ci-ubuntu-base:$date_tag " "$tmp/missing.log" | cut -d: -f1)"
+first_create_line="$(grep -n -F "buildx imagetools create --prefer-index=false -t ghcr.io/kitae0522/ci-ubuntu-base:$date_tag " "$tmp/missing.log" | cut -d: -f1)"
 test "$second_inspect_line" -lt "$first_create_line"
 for image in ghcr.io/kitae0522/ci-ubuntu-base ghcr.io/kitae0522/ci-ubuntu-docker; do
-  dated_line="$(grep -n -F "buildx imagetools create -t $image:$date_tag " "$tmp/missing.log" | cut -d: -f1)"
-  stable_line="$(grep -n -F "buildx imagetools create -t $image:24.04 " "$tmp/missing.log" | cut -d: -f1)"
+  dated_line="$(grep -n -F "buildx imagetools create --prefer-index=false -t $image:$date_tag " "$tmp/missing.log" | cut -d: -f1)"
+  stable_line="$(grep -n -F "buildx imagetools create --prefer-index=false -t $image:24.04 " "$tmp/missing.log" | cut -d: -f1)"
   test "$dated_line" -lt "$stable_line"
 done
 
