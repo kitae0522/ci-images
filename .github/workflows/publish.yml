@@ -85,3 +85,69 @@ jobs:
           subject-digest: ${{ steps.publish.outputs.docker_digest }}
           sbom-path: docker.cdx.json
           push-to-registry: true
+
+  smoke-base:
+    needs: candidate
+    runs-on: [self-hosted, lab, linux, x64, container, lab-small]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/kitae0522/ci-ubuntu-base:sha-${{ needs.candidate.outputs.short_sha }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: >-
+        --cpus 1.5
+        --memory 2560m
+        --pids-limit 768
+        --cgroup-parent docker-workloads-ci.slice
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: tests/base-contract.sh
+
+  smoke-docker:
+    needs: candidate
+    runs-on: [self-hosted, lab, linux, x64, container, lab-small]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/kitae0522/ci-ubuntu-docker:sha-${{ needs.candidate.outputs.short_sha }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: >-
+        --cpus 1.5
+        --memory 2560m
+        --pids-limit 768
+        --cgroup-parent docker-workloads-ci.slice
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: tests/base-contract.sh
+      - run: tests/docker-contract.sh
+        env:
+          EXPECT_DOCKER_SOCKET: "1"
+
+  promote:
+    needs: [candidate, smoke-base, smoke-docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          scripts/promote.sh \
+            "${{ needs.candidate.outputs.base_digest }}" \
+            "${{ needs.candidate.outputs.docker_digest }}"
