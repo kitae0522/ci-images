@@ -13,14 +13,17 @@ resource contract used by the `lab` runner.
 - `curl`, `wget`, `gnupg`, and `jq`;
 - `zip`, `unzip`, `tar`, `xz-utils`, `bzip2`, and `zstd`;
 - `build-essential` (`gcc`, `g++`, and `make`), `pkg-config`, `cmake`,
-  `ninja-build`, `python3`, and `file`.
+  `ninja-build`, `python3`, and `file`;
+- Chrome/Chromium shared libraries (`libglib`, `nss`, `gbm`, and related
+  X11 packages) plus Liberation fonts, so a job-downloaded browser can start.
 
 `ci-ubuntu-docker` extends the base image with `docker-ce-cli`, Buildx, and
 Compose. It contains Docker client tools only, not a Docker daemon.
 
-The images deliberately exclude Go, Node.js, Rust, Java, project database
-clients, cloud CLIs, credentials, private source, SSH keys, Nix secrets, and a
-Docker daemon. Workflows choose language versions with `setup-*` actions.
+The images deliberately exclude Go, Node.js, Rust, Java, Chrome/Chromium
+binaries, project database clients, cloud CLIs, credentials, private source,
+SSH keys, Nix secrets, and a Docker daemon. Workflows choose language versions
+with `setup-*` actions and download a browser only when a job needs one.
 
 The upstream Actions runner automatically mounts `/var/run/docker.sock` into
 container jobs. This repository relocates the real daemon socket, so that

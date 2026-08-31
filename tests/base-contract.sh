@@ -13,3 +13,7 @@ printf 'int main(void) { return 0; }\n' >"$tmp/main.c"
 cc "$tmp/main.c" -o "$tmp/hello"
 "$tmp/hello"
 test "$(locale charmap)" = UTF-8
+for lib in libglib-2.0.so.0 libnss3.so libgbm.so.1; do
+  test -e "/usr/lib/x86_64-linux-gnu/$lib"
+done
+test -d /usr/share/fonts/truetype/liberation
