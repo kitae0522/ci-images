@@ -116,6 +116,37 @@ jobs:
 `)
 }
 
+func TestLabGoSetupRejectsRemoteCache(t *testing.T) {
+	const path = "templates/go.yml"
+	const valid = `
+jobs:
+  test:
+    runs-on: [self-hosted, lab, linux, x64, container, lab-small]
+    container:
+      image: ghcr.io/kitae0522/ci-ubuntu-base:24.04
+      options: >-
+        --cpus 1.5
+        --memory 2560m
+        --pids-limit 768
+        --cgroup-parent docker-workloads-ci.slice
+    steps:
+      - run: test ! -S /var/run/docker.sock
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+`
+	requireNoViolation(t, path, valid)
+
+	for _, invalid := range []string{
+		replaceOnce(t, valid, "          cache: false\n", ""),
+		replaceOnce(t, valid, "          cache: false\n", "          cache: true\n"),
+		replaceOnce(t, valid, "          cache: false\n", "          cache: ${{ inputs.cache }}\n"),
+	} {
+		requireSpecificViolation(t, path, invalid, "setup_go_remote_cache_forbidden", "actions/setup-go must set with.cache to false on lab runners")
+	}
+}
+
 func TestBaseRejectsSocketAndHostPrivileges(t *testing.T) {
 	const path = ".github/workflows/lab-capacity-smoke.yml"
 	source := workflowMutation(t, path, "        --cpus 1.5\n", "        --privileged\n")
