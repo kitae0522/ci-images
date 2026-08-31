@@ -337,6 +337,33 @@ func rawFirstStep(rawJob *yaml.Node) (*yaml.Node, bool) {
 	return first, true
 }
 
+func checkSetupGoCache(path, jobName string, rawJob *yaml.Node) []Violation {
+	rawSteps, found := mappingField(rawJob, "steps")
+	if !found || rawSteps == nil || rawSteps.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var violations []Violation
+	for _, rawStep := range rawSteps.Content {
+		uses, found := mappingField(rawStep, "uses")
+		if !found || uses == nil || uses.Kind != yaml.ScalarNode ||
+			!strings.HasPrefix(strings.ToLower(uses.Value), "actions/setup-go@") {
+			continue
+		}
+		with, found := mappingField(rawStep, "with")
+		cache, cacheFound := mappingField(with, "cache")
+		if !found || with == nil || with.Kind != yaml.MappingNode ||
+			!cacheFound || cache == nil || cache.Kind != yaml.ScalarNode || cache.Value != "false" {
+			violations = append(violations, violationWithCode(
+				"setup_go_remote_cache_forbidden",
+				path,
+				jobName,
+				"actions/setup-go must set with.cache to false on lab runners",
+			))
+		}
+	}
+	return violations
+}
+
 func checkLabBase(path, jobName string, contract jobContract, workflow *actionlint.Workflow, job *actionlint.Job, rawRoot, rawJob *yaml.Node) []Violation {
 	violations := checkRunner(path, jobName, job, labLabels)
 	violations = append(violations, checkNoServices(path, jobName, job, rawJob)...)
@@ -359,6 +386,7 @@ func checkLabBase(path, jobName string, contract jobContract, workflow *actionli
 	// otherwise omitted by actionlint's typed AST; the guard text itself still
 	// comes from actionlint's parsed step.
 	violations = append(violations, checkGuard(path, jobName, workflow, job, rawRoot, rawJob)...)
+	violations = append(violations, checkSetupGoCache(path, jobName, rawJob)...)
 	return violations
 }
 
@@ -419,6 +447,7 @@ func checkLabDocker(path, jobName string, contract jobContract, job *actionlint.
 	}
 	violations = append(violations, checkImage(path, jobName, job.Container, contract.image)...)
 	violations = append(violations, checkResourceOptions(path, jobName, job.Container)...)
+	violations = append(violations, checkSetupGoCache(path, jobName, rawJob)...)
 	return violations
 }
 
