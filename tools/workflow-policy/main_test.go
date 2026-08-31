@@ -73,12 +73,9 @@ func requireNoViolation(t *testing.T, path string, source string) {
 }
 
 func TestExactLabBaseContractPasses(t *testing.T) {
-	requireNoViolation(t, ".github/workflows/lab-capacity-smoke.yml", `
-name: Lab Capacity Smoke
-on:
-  workflow_dispatch:
+	requireNoViolation(t, "templates/go.yml", `
 jobs:
-  hold:
+  test:
     runs-on: [self-hosted, lab, linux, x64, container, lab-small]
     container:
       image: ghcr.io/kitae0522/ci-ubuntu-base:24.04
@@ -148,7 +145,7 @@ jobs:
 }
 
 func TestBaseRejectsSocketAndHostPrivileges(t *testing.T) {
-	const path = ".github/workflows/lab-capacity-smoke.yml"
+	const path = "templates/go.yml"
 	source := workflowMutation(t, path, "        --cpus 1.5\n", "        --privileged\n")
 	requireSpecificViolation(t, path, source, "container_options_mismatch", `container.options must exactly equal "--cpus 1.5 --memory 2560m --pids-limit 768 --cgroup-parent docker-workloads-ci.slice"`)
 
@@ -157,7 +154,7 @@ func TestBaseRejectsSocketAndHostPrivileges(t *testing.T) {
 }
 
 func TestBaseRejectsGuardOverrides(t *testing.T) {
-	const path = ".github/workflows/lab-capacity-smoke.yml"
+	const path = "templates/go.yml"
 	fixtures := []struct {
 		old, replacement, code, message string
 	}{
@@ -192,26 +189,26 @@ func TestBaseRejectsGuardOverrides(t *testing.T) {
 			message:     "steps[0].timeout-minutes must not override the guard",
 		},
 		{
-			old:         "  hold:\n",
-			replacement: "  hold:\n    if: ${{ always() }}\n",
+			old:         "  test:\n",
+			replacement: "  test:\n    if: ${{ always() }}\n",
 			code:        "guard_job_if_forbidden",
 			message:     "job.if must not make the guard skippable",
 		},
 		{
-			old:         "  hold:\n",
-			replacement: "  hold:\n    continue-on-error: false\n",
+			old:         "  test:\n",
+			replacement: "  test:\n    continue-on-error: false\n",
 			code:        "guard_job_continue_forbidden",
 			message:     "job.continue-on-error must not override the guard",
 		},
 		{
-			old:         "  hold:\n",
-			replacement: "  hold:\n    defaults:\n      run:\n        shell: bash\n",
+			old:         "  test:\n",
+			replacement: "  test:\n    defaults:\n      run:\n        shell: bash\n",
 			code:        "guard_job_defaults_forbidden",
 			message:     "job.defaults must not override the guard shell",
 		},
 		{
-			old:         "  hold:\n",
-			replacement: "  hold:\n    strategy:\n      matrix:\n        value: [one, two]\n",
+			old:         "  test:\n",
+			replacement: "  test:\n    strategy:\n      matrix:\n        value: [one, two]\n",
 			code:        "guard_job_strategy_forbidden",
 			message:     "job.strategy must not modify guarded execution",
 		},
@@ -221,12 +218,12 @@ func TestBaseRejectsGuardOverrides(t *testing.T) {
 		requireSpecificViolation(t, path, source, fixture.code, fixture.message)
 	}
 	workflow := workflowSource(t, path)
-	workflow = replaceOnce(t, workflow, "permissions:\n  contents: read\n", "defaults:\n  run:\n    shell: bash\n\npermissions:\n  contents: read\n")
+	workflow = replaceOnce(t, workflow, "jobs:\n", "defaults:\n  run:\n    shell: bash\n\njobs:\n")
 	requireSpecificViolation(t, path, workflow, "guard_workflow_defaults_forbidden", "workflow.defaults must not override the guard shell")
 }
 
 func TestBaseRejectsDynamicPolicyFields(t *testing.T) {
-	const path = ".github/workflows/lab-capacity-smoke.yml"
+	const path = "templates/go.yml"
 	fixtures := []struct {
 		old, replacement, code, message string
 	}{
@@ -256,7 +253,7 @@ func TestBaseRejectsDynamicPolicyFields(t *testing.T) {
 }
 
 func TestDockerRejectsWrongEnvVolumeDestinationAndServices(t *testing.T) {
-	const path = ".github/workflows/publish.yml"
+	const path = "templates/docker-build.yml"
 	fixtures := []struct {
 		old, replacement, code, message string
 	}{
@@ -273,8 +270,8 @@ func TestDockerRejectsWrongEnvVolumeDestinationAndServices(t *testing.T) {
 			message:     `container.volumes must contain only "/run/lab-docker/docker.sock:/run/lab-docker/docker.sock"`,
 		},
 		{
-			old:         "      volumes:\n        - /run/lab-docker/docker.sock:/run/lab-docker/docker.sock\n    steps:\n      - uses: actions/checkout@",
-			replacement: "      volumes:\n        - /run/lab-docker/docker.sock:/run/lab-docker/docker.sock\n    services:\n      docker:\n        image: docker:27\n    steps:\n      - uses: actions/checkout@",
+			old:         "    timeout-minutes: 30\n    steps:\n      - uses: actions/checkout@",
+			replacement: "    timeout-minutes: 30\n    services:\n      docker:\n        image: docker:27\n    steps:\n      - uses: actions/checkout@",
 			code:        "services_forbidden",
 			message:     "services are forbidden for lab jobs",
 		},
@@ -286,7 +283,7 @@ func TestDockerRejectsWrongEnvVolumeDestinationAndServices(t *testing.T) {
 }
 
 func TestUnknownAndMissingJobsFailClosed(t *testing.T) {
-	const unknownPath = ".github/workflows/lab-capacity-smoke.yml"
+	const unknownPath = "templates/go.yml"
 	unknown := workflowSource(t, unknownPath) + `
   surprise:
     runs-on: ubuntu-24.04

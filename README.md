@@ -39,14 +39,16 @@ lab job requires an intentional policy change and review. The inventory is:
 
 - Hosted jobs (`validate`, `candidate`, and `promote`) run only on
   `ubuntu-24.04` and have no job container or services.
-- Lab-base jobs (`smoke-base`, `hold`, and the Go template's `test`) use the
-  exact `self-hosted, lab, linux, x64, container, lab-small` labels, the
+- This repository no longer runs jobs on the lab self-hosted pool. Lab
+  contracts remain only in the reusable templates that private consumers copy.
+- Lab-base templates (`templates/go.yml`) use the exact
+  `self-hosted, lab, linux, x64, container, lab-small` labels, the
   allowlisted base image, and the standard 1.5 CPU / 2560 MiB / 768 PID /
   `docker-workloads-ci.slice` options. They have no services, volumes, or
   container environment, and their first step must be exactly
   `test ! -S /var/run/docker.sock` with no execution override.
-- The lab-docker jobs (`smoke-docker` and the Docker template's `test`) use
-  the same labels and resource options, the allowlisted Docker image, exactly
+- Lab-docker templates (`templates/docker-build.yml`) use the same labels and
+  resource options, the allowlisted Docker image, exactly
   `DOCKER_HOST=unix:///run/lab-docker/docker.sock`, and exactly one
   `/run/lab-docker/docker.sock:/run/lab-docker/docker.sock` mapping. Services,
   default-socket mappings, extra host mounts, and dynamic policy values are
@@ -67,7 +69,8 @@ The hosted validation job runs the pinned Go policy module and actionlint:
   candidate tag. It includes the source SHA, `GITHUB_RUN_ID`, and
   `GITHUB_RUN_ATTEMPT`.
 - `:24.04-YYYYMMDD` is an immutable dated release and is never overwritten.
-- `:24.04` is the rolling stable tag, moved only after lab smoke succeeds.
+- `:24.04` is the rolling stable tag, moved after the hosted candidate
+  publishes and the promotion job retags the candidate digest.
 - An image digest (`@sha256:...`) is the strongest reproducibility reference.
 
 Pin a digest or dated tag when a workflow needs an immutable reference. A
@@ -114,12 +117,8 @@ this sequence:
    continue only when its non-empty `high_vulnerability_exception` input
    documents an owner, justification, and expiration; that exception is copied
    to the workflow summary.
-3. Two read-only `lab-small` jobs consume the exact published digests, not a
-   mutable tag. The base smoke asserts the default socket is inert and repeats
-   the base contract; the Docker smoke opts into the alternate socket and
-   repeats both contracts.
-4. The dependent GitHub-hosted promotion job creates the dated tag if absent
-   and moves `:24.04` to the smoke-tested candidate digest.
+3. The GitHub-hosted promotion job creates the dated tag if absent and moves
+   `:24.04` to the candidate digest. Lab no longer smokes these images.
 
 Only the hosted `candidate` and `promote` jobs have `packages: write` (the
 candidate also has attestation permissions). Lab jobs have only

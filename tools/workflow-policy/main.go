@@ -43,13 +43,8 @@ var workflowContracts = map[string]map[string]jobContract{
 		"validate": {kind: hostedContract},
 	},
 	".github/workflows/publish.yml": {
-		"candidate":    {kind: hostedContract},
-		"smoke-base":   {kind: labBaseContract, image: "ghcr.io/kitae0522/ci-ubuntu-base@${{ needs.candidate.outputs.base_digest }}"},
-		"smoke-docker": {kind: labDockerContract, image: "ghcr.io/kitae0522/ci-ubuntu-docker@${{ needs.candidate.outputs.docker_digest }}"},
-		"promote":      {kind: hostedContract},
-	},
-	".github/workflows/lab-capacity-smoke.yml": {
-		"hold": {kind: labBaseContract, image: "ghcr.io/kitae0522/ci-ubuntu-base:24.04"},
+		"candidate": {kind: hostedContract},
+		"promote":   {kind: hostedContract},
 	},
 	"templates/go.yml": {
 		"test": {kind: labBaseContract, image: "ghcr.io/kitae0522/ci-ubuntu-base:24.04"},
