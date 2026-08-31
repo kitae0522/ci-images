@@ -6,14 +6,11 @@ Candidate references use the immutable format
 `candidate-<sha7>-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>`; lab smoke consumes the
 published digest rather than a tag.
 
-The `lab` runner is reserved for trusted, protected-repository revisions. Fork-
+The `lab` runner is reserved for trusted private consumer repositories. Fork-
 controlled code must never select the `lab` labels, and the public
-`ci-images` repository never runs `pull_request` or `pull_request_target` code on
-`lab`. Pull-request validation stays on GitHub-hosted runners. Lab smoke runs
-only after a run-unique immutable candidate is published from protected `main`
-(or an authorized manual dispatch) and has package read permission only. The
-hosted `candidate` and `promote` jobs are the only jobs with `packages: write`;
-lab smoke jobs remain limited to `contents: read` and `packages: read`.
+`ci-images` repository never runs jobs on `lab`. Pull-request validation,
+candidate publication, and promotion stay on GitHub-hosted runners. The
+hosted `candidate` and `promote` jobs are the only jobs with `packages: write`.
 
 ## Docker socket
 
@@ -27,16 +24,16 @@ workflow or template mappings to either `/var/run/docker.sock` or
 
 The policy tool has a closed inventory of runner contracts. Hosted
 `validate`, `candidate`, and `promote` jobs run only on `ubuntu-24.04` and have
-no container or services. Lab-base `smoke-base`, `hold`, and the Go template's
-`test` use the exact `self-hosted, lab, linux, x64, container, lab-small`
-labels, the allowlisted base image, and only the standard CPU, memory, PID,
-and cgroup options. They have no services, volumes, or container environment;
-the inert-socket guard must be the first step and may not be made skippable or
-override its shell.
+no container or services. This repository does not run lab jobs. Lab-base
+templates (`templates/go.yml`) use the exact
+`self-hosted, lab, linux, x64, container, lab-small` labels, the allowlisted
+base image, and only the standard CPU, memory, PID, and cgroup options. They
+have no services, volumes, or container environment; the inert-socket guard
+must be the first step and may not be made skippable or override its shell.
 
-Docker-enabled `smoke-docker` and Docker-template `test` jobs must use the
-same labels and resource options, the allowlisted Docker image, exactly one
-mapping of `/run/lab-docker/docker.sock` to the same path, and exactly
+Docker-enabled templates (`templates/docker-build.yml`) must use the same
+labels and resource options, the allowlisted Docker image, exactly one mapping
+of `/run/lab-docker/docker.sock` to the same path, and exactly
 `DOCKER_HOST=unix:///run/lab-docker/docker.sock`. Services, default-socket or
 other host mounts, privileged/PID-host options, dynamic policy fields, and
 unknown lab jobs are rejected. The Docker image contains client tools only,
