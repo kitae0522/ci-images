@@ -19,7 +19,7 @@ jobs:
         with:
           go-version: '1.25.0'
           cache-dependency-path: tools/workflow-policy/go.sum
-      - uses: hadolint/hadolint-action@3fc49fb50d59c6ab7917a2e4195dba633e515b29 # v3.2.0
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: "images/*/Dockerfile"
           recursive: true
